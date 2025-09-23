@@ -1,0 +1,66 @@
+# ===== ESP-IDF (v5.5.x) =====
+# Out-of-source build outputs
+build*/
+cmake-build-*/
+out/
+dist/
+
+# IDF Component Manager:
+# Keep dependencies.lock in git; ignore downloaded component cache.
+managed_components/
+
+# Project config:
+# Track sdkconfig.defaults; ignore per-developer generated files.
+sdkconfig.old
+sdkconfig.*.old
+# If you choose to version sdkconfig instead, comment the three lines above.
+
+# Compile commands exported to project root (CMake may symlink/copy this)
+compile_commands.json
+
+# ccache (optional, speeds up builds)
+.ccache/
+
+# Debug/trace crumbs
+.gdb_history
+openocd.log
+gdb.txt
+*.trace
+*.pcap
+core
+core.*
+
+# Python virtual environments (common in IDF setups / devcontainers)
+.venv/
+venv/
+env/
+
+# ===== VSCode =====
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+# Optional: ignore workspace files generated locally
+*.code-workspace
+
+# JetBrains (if someone opens it in CLion/IDEA)
+.idea/
+
+# ===== OS Junk =====
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+# Windows
+Thumbs.db
+Desktop.ini
+
+# ===== Editors / temp =====
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+*.orig
+*.log

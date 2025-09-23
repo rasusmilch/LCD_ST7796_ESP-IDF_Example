@@ -1,0 +1,8 @@
+# /main/idf_component.yml
+## Pull maintained components from Espressif's registry.
+dependencies:
+  idf: ">=5.3"
+  lvgl/lvgl: "^9" # LVGL v9.x
+  espressif/esp_lvgl_port: "^2.6.0"
+  espressif/esp_lcd_st7796: "^1.3.0"
+  espressif/esp_lcd_touch_ft5x06: "^1.0.7"
