@@ -1,6 +1,7 @@
 // /main/main.c
 // ESP-IDF v5.5 — ESP32-S3 DevKitC-N8, ST7796 SPI bring-up (NO LVGL).
-// Horizontal RGB bars + centered white box. DMA completion sync. MADCTL fixes Y scan.
+// Landscape 480x320. Explicit RGB565 HI/LO packing + DMA sync.
+// NEW: DFC(0xB6) GS/SS control so delayed drawing appears top→down.
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -28,11 +29,11 @@ static const char *TAG = "st7796_no_lvgl";
 #define PIN_SPI_MISO  13
 #define PIN_LCD_BL    14
 
-// SPI/LCD
+// SPI/LCD (LANDSCAPE)
 #define LCD_HOST             SPI2_HOST
 #define LCD_SPI_CLOCK_HZ     (10 * 1000 * 1000)
-#define LCD_W                320       // portrait columns
-#define LCD_H                480       // portrait rows
+#define LCD_W                480       // landscape columns
+#define LCD_H                320       // landscape rows
 #define CHUNK_LINES          40
 
 // ST7796 regs/bits
@@ -41,10 +42,30 @@ static const char *TAG = "st7796_no_lvgl";
 #define REG_CASET            0x2A
 #define REG_PASET            0x2B
 #define REG_RAMWR            0x2C
+#define REG_DFC              0xB6      // Display Function Control
 #define MADCTL_MY            0x80
 #define MADCTL_MX            0x40
 #define MADCTL_MV            0x20
 #define MADCTL_BGR           0x08
+
+// Landscape orientation: 90° CW (good on your unit). Add MY if vertically flipped.
+#define LANDSCAPE_MADCTL     (MADCTL_MV | MADCTL_MX)
+
+// ---- GS (gate scan) helper: 0=top->bottom, 1=bottom->top ----
+static esp_err_t wr_param(esp_lcd_panel_io_handle_t io, uint8_t reg, const void *data, size_t len) {
+    return esp_lcd_panel_io_tx_param(io, reg, data, len);
+}
+static void st7796_set_scan_dir(esp_lcd_panel_io_handle_t io, bool gs_bottom_to_top, bool ss_right_to_left) {
+    // DFC params: P1(BYPASS/RCM/RM/PTG/PT) we keep 0x00 (system IF, normal scan in non-display)
+    // P2: [GS|SS|SM|ISC3..0]; we set GS/SS; keep SM=0, ISC=0x2 default is fine
+    // P3: [0|0|NL5..0]; 0x3B -> 480 lines (8*(0x3B+1) = 480)
+    uint8_t p1 = 0x00;
+    uint8_t p2 = (gs_bottom_to_top ? 0x80 : 0x00) | (ss_right_to_left ? 0x40 : 0x00) | 0x02; // ISC=2
+    uint8_t p3 = 0x3B;
+    uint8_t dfc[3] = { p1, p2, p3 };
+    ESP_ERROR_CHECK(wr_param(io, REG_DFC, dfc, sizeof(dfc)));
+    ESP_LOGI(TAG, "DFC set: GS=%d, SS=%d (p1=0x%02X p2=0x%02X p3=0x%02X)", gs_bottom_to_top, ss_right_to_left, p1, p2, p3);
+}
 
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -63,10 +84,6 @@ static void backlight_on(void) {
     ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
 }
 
-static esp_err_t wr_param(esp_lcd_panel_io_handle_t io, uint8_t reg, const void *data, size_t len) {
-    return esp_lcd_panel_io_tx_param(io, reg, data, len);
-}
-
 // ---- DMA completion sync ----
 static SemaphoreHandle_t s_color_done_sem = NULL;
 static bool on_color_done(esp_lcd_panel_io_handle_t io,
@@ -75,7 +92,7 @@ static bool on_color_done(esp_lcd_panel_io_handle_t io,
 {
     BaseType_t hp = pdFALSE;
     xSemaphoreGiveFromISR((SemaphoreHandle_t)user_ctx, &hp);
-    return hp == pdTRUE; // yield if needed
+    return hp == pdTRUE;
 }
 static void wait_color_done(void) { xSemaphoreTake(s_color_done_sem, portMAX_DELAY); }
 
@@ -93,8 +110,6 @@ static void push_color(esp_lcd_panel_io_handle_t io, const void *data, size_t by
     ESP_ERROR_CHECK(esp_lcd_panel_io_tx_color(io, REG_RAMWR, data, bytes));
     wait_color_done(); // must finish before reusing the buffer
 }
-
-// Pack one solid RGB565 color into a byte buffer as HI,LO
 static void pack_solid_color(uint8_t *dst, int pixels, uint16_t c)
 {
     uint8_t hi = (uint8_t)(c >> 8), lo = (uint8_t)(c & 0xFF);
@@ -102,7 +117,7 @@ static void pack_solid_color(uint8_t *dst, int pixels, uint16_t c)
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "ST7796 bring-up (portrait %dx%d, SPI=%u Hz)", LCD_W, LCD_H, LCD_SPI_CLOCK_HZ);
+    ESP_LOGI(TAG, "ST7796 bring-up (LANDSCAPE %dx%d, SPI=%u Hz)", LCD_W, LCD_H, LCD_SPI_CLOCK_HZ);
     beeper_init_disable();
     backlight_on();
 
@@ -128,8 +143,8 @@ void app_main(void) {
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
-        .trans_queue_depth = 1,      // single in-flight
-        .on_color_trans_done = NULL, // register via callback API
+        .trans_queue_depth = 1,
+        .on_color_trans_done = NULL,
         .user_ctx = NULL,
         .cs_ena_pretrans = 0,
         .cs_ena_posttrans = 0,
@@ -138,7 +153,7 @@ void app_main(void) {
     esp_lcd_panel_io_callbacks_t cbs = { .on_color_trans_done = on_color_done };
     ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io, &cbs, (void*)s_color_done_sem));
 
-    // ST7796 panel (RGB element order)
+    // ST7796 vendor init
     esp_lcd_panel_handle_t panel = NULL;
     const esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = PIN_LCD_RST,
@@ -151,11 +166,15 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_lcd_panel_set_gap(panel, 0, 0));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
 
-    // Pixel format + orientation: 16bpp, portrait, **flip Y** (MY) to correct bar order.
-    uint8_t colmod = 0x55;                 // 16bpp
-    uint8_t madctl = MADCTL_MY;            // vertical mirror only (top-left origin for our y=0)
+    // Pixel format + orientation
+    uint8_t colmod = 0x55;
+    uint8_t madctl = LANDSCAPE_MADCTL;
     ESP_ERROR_CHECK(wr_param(io, REG_COLMOD, &colmod, 1));
     ESP_ERROR_CHECK(wr_param(io, REG_MADCTL, &madctl, 1));
+
+    // *** NEW: force top->bottom gate scan so delayed chunks appear top-down ***
+    // Set GS=0 (top->bottom). If you want bottom->top, pass true.
+    st7796_set_scan_dir(io, /*gs_bottom_to_top=*/false, /*ss_right_to_left=*/false);
 
     // ---- Test 1: horizontal bars (top=RED, mid=GREEN, bottom=BLUE) ----
     static uint8_t full_chunk[LCD_W * CHUNK_LINES * 2]; // bytes
@@ -178,6 +197,7 @@ void app_main(void) {
             pack_solid_color(full_chunk, LCD_W * lines, segs[s].c);
             set_window(io, 0, y, LCD_W - 1, y + lines - 1);   // inclusive
             push_color(io, full_chunk, (size_t)LCD_W * lines * 2);
+            vTaskDelay(100);
             y += lines;
         }
     }
@@ -195,6 +215,6 @@ void app_main(void) {
         y += lines;
     }
 
-    ESP_LOGI(TAG, "Done. Expect TOP: red, MIDDLE: green, BOTTOM: blue, white box centered.");
+    ESP_LOGI(TAG, "Done. Bars should animate TOP->DOWN when delays are present.");
     while (1) vTaskDelay(pdMS_TO_TICKS(1000));
 }
