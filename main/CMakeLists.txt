@@ -3,13 +3,8 @@ idf_component_register(
     SRCS "main.c" "beeper.c"
     INCLUDE_DIRS "."
     REQUIRES
-        driver              # GPIO/I2C/SPI/LEDC
-        esp_lcd             # panel + IO base
-        lvgl__lvgl          # managed component name in build logs
-        esp_lvgl_port
+        driver
+        esp_lcd
+        lvgl__lvgl
         esp_lcd_st7796
-        esp_lcd_touch_ft5x06
-        fatfs               # <-- needed only if USE_SD_CARD=1
-        vfs                 # <-- needed only if USE_SD_CARD=1
-        sdmmc               # <-- needed only if USE_SD_CARD=1
 )
