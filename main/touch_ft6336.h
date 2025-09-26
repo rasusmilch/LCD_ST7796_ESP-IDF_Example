@@ -1,26 +1,36 @@
 #pragma once
 #include "esp_err.h"
 #include "esp_lcd_touch.h"
+#include "lvgl.h"   // <-- add this so lv_indev_t is visible
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct {
-    int i2c_sda_io;       // I2C SDA GPIO (external pull-up present)
-    int i2c_scl_io;       // I2C SCL GPIO (external pull-up present)
-    int int_io;           // Touch interrupt GPIO (needs INTERNAL pull-up)
-    int rst_io;           // Optional: reset GPIO, -1 if not used
-    uint16_t x_max;       // Panel native width
-    uint16_t y_max;       // Panel native height
-    bool swap_xy;         // Orientation
+    int i2c_sda_io;
+    int i2c_scl_io;
+    int int_io;
+    int rst_io;
+    uint16_t x_max;
+    uint16_t y_max;
+    bool swap_xy;
     bool mirror_x;
     bool mirror_y;
-    uint32_t i2c_clk_hz;  // I2C frequency (e.g., 100000 or 400000)
+    uint32_t i2c_clk_hz;
 } touch_ft6336_cfg_t;
 
 esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_t *out_tp);
+
+/* NEW: register the touch with LVGL, returns lv_indev_t* */
+lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp);
+
+/* Keep your old helper (polls the controller directly and logs coords) */
 void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag);
+
+/* NEW: compatibility wrapper so existing main.c builds:
+   accepts an lv_indev_t*, but just uses the internal TP handle */
+void touch_dbg_start(lv_indev_t *indev);
 
 #ifdef __cplusplus
 }

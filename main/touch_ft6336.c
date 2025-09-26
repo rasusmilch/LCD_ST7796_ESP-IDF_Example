@@ -14,6 +14,7 @@
 
 static const char *TAG = "touch_ft6336";
 
+/* Simple context so callbacks can access the handle */
 typedef struct {
     i2c_master_bus_handle_t i2c_bus;
     esp_lcd_panel_io_handle_t io;
@@ -22,11 +23,89 @@ typedef struct {
 
 static touch_ctx_t s_ctx = {0};
 
+/* ---------- LVGL read callback (v9 signature) ---------- */
+static void touch_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    if (!s_ctx.tp) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    esp_lcd_touch_read_data(s_ctx.tp);
+
+    uint16_t x = 0, y = 0;
+    uint8_t points = 0;
+    bool touched = esp_lcd_touch_get_coordinates(s_ctx.tp, &x, &y, NULL, &points, 1);
+
+    if (touched && points > 0) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = (lv_coord_t)x;
+        data->point.y = (lv_coord_t)y;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+/* Register LVGL pointer indev for this touch */
+lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp)
+{
+    s_ctx.tp = tp;  // cache for callbacks
+
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, touch_lvgl_read_cb);
+    return indev;
+}
+
+/* ---------- Debug logger task (polls controller directly) ---------- */
+static void touch_dbg_task(void *arg)
+{
+    (void)arg;
+    uint16_t last_x = 0, last_y = 0;
+    bool last_pressed = false;
+
+    for (;;) {
+        if (s_ctx.tp) {
+            esp_lcd_touch_read_data(s_ctx.tp);
+            uint16_t x = 0, y = 0;
+            uint8_t n = 0;
+            bool pressed = esp_lcd_touch_get_coordinates(s_ctx.tp, &x, &y, NULL, &n, 1);
+
+            if (pressed && n > 0) {
+                if (!last_pressed || x != last_x || y != last_y) {
+                    ESP_LOGI("touch_dbg", "touch: (%u,%u)", (unsigned)x, (unsigned)y);
+                }
+                last_x = x; last_y = y;
+            } else {
+                if (last_pressed) ESP_LOGI("touch_dbg", "touch: released");
+            }
+            last_pressed = pressed && n > 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
+void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag)
+{
+    (void)tag;
+    if (tp) s_ctx.tp = tp;
+    xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3*1024, NULL, 4, NULL, 0);
+}
+
+/* Compatibility wrapper to match your existing call-site */
+void touch_dbg_start(lv_indev_t *indev)
+{
+    (void)indev;
+    xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3*1024, NULL, 4, NULL, 0);
+}
+
+/* ---------- Initialization (I2C bus + FT6336 via FT5x06 driver) ---------- */
 esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_t *out_tp)
 {
     ESP_RETURN_ON_FALSE(cfg, ESP_ERR_INVALID_ARG, TAG, "cfg is NULL");
 
-    // INT pin: input with INTERNAL pull-up (only INT needs it)
+    // INT pin: input with INTERNAL pull-up (you have external pull-ups on SDA/SCL only)
     if (cfg->int_io >= 0) {
         gpio_config_t gi = {
             .pin_bit_mask = 1ULL << cfg->int_io,
@@ -38,7 +117,7 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
         ESP_RETURN_ON_ERROR(gpio_config(&gi), TAG, "INT pin cfg failed");
     }
 
-    // Optional reset pin (active low on most FT5x06/FT6336)
+    // Optional reset pin
     if (cfg->rst_io >= 0) {
         gpio_config_t gr = {
             .pin_bit_mask = 1ULL << cfg->rst_io,
@@ -48,13 +127,14 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
             .intr_type = GPIO_INTR_DISABLE
         };
         ESP_RETURN_ON_ERROR(gpio_config(&gr), TAG, "RST pin cfg failed");
+        // active-low reset pulse
         gpio_set_level(cfg->rst_io, 0);
         vTaskDelay(pdMS_TO_TICKS(10));
         gpio_set_level(cfg->rst_io, 1);
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    // I2C master bus (EXTERNAL pull-ups present -> disable internal)
+    // I2C master bus (EXTERNAL pull-ups on SDA/SCL -> disable internal)
     i2c_master_bus_config_t bus_cfg = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = 0,
@@ -63,16 +143,24 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
         .glitch_ignore_cnt = 7,
         .intr_priority = 0,
         .trans_queue_depth = 0,
-        .flags = {
-            .enable_internal_pullup = 0,   // external pull-ups on your board
-        },
+        .flags = {.enable_internal_pullup = 0},
     };
     ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_ctx.i2c_bus), TAG, "i2c bus create failed");
 
-    // I2C panel IO wrapper (macro with sane defaults)
+    // Panel IO wrapper for the FT5x06/FT6336 touch over I2C
+#ifdef ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG
     esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
-    io_cfg.dev_addr = 0x38;  // FT6336/FT5x06 default address
-    io_cfg.scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : 100000;  // 100 kHz default
+#else
+    esp_lcd_panel_io_i2c_config_t io_cfg = {
+        .dev_addr = 0x38,
+        .control_phase_bytes = 1,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .xfer_queue_depth = 0,
+    };
+#endif
+    io_cfg.dev_addr = 0x38;  // FT6336/FT5x06 default
+    io_cfg.scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : 100000; // 100k first; 400k once stable
 
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_ctx.i2c_bus, &io_cfg, &s_ctx.io),
                         TAG, "panel io i2c failed");
@@ -84,8 +172,8 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
         .rst_gpio_num = cfg->rst_io,
         .int_gpio_num = cfg->int_io,
         .levels = {
-            .reset = 0,       // active low reset if used
-            .interrupt = 0,   // INT low when touched on FT6336
+            .reset = 0,     // active low reset
+            .interrupt = 0, // INT goes low on touch for FT6336
         },
         .flags = {
             .swap_xy = cfg->swap_xy,
@@ -94,43 +182,13 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
         },
     };
 
-    ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(s_ctx.io, &tp_cfg, &s_ctx.tp),
-                        TAG, "touch new failed");
+    esp_err_t err = esp_lcd_touch_new_i2c_ft5x06(s_ctx.io, &tp_cfg, &s_ctx.tp);
+    ESP_RETURN_ON_ERROR(err, TAG, "FT5x06/FT6336 init failed");
 
-    ESP_LOGI(TAG, "FT5x06/FT6336 touch ready at 0x%02X (%dx%d) swap_xy=%d mx=%d my=%d",
-             io_cfg.dev_addr, tp_cfg.x_max, tp_cfg.y_max,
+    ESP_LOGI(TAG, "FT5x06/FT6336 touch ready at 0x%02X (%ux%u) swap_xy=%d mx=%d my=%d",
+             io_cfg.dev_addr, (unsigned)tp_cfg.x_max, (unsigned)tp_cfg.y_max,
              (int)tp_cfg.flags.swap_xy, (int)tp_cfg.flags.mirror_x, (int)tp_cfg.flags.mirror_y);
 
     if (out_tp) *out_tp = s_ctx.tp;
     return ESP_OK;
-}
-
-static void touch_dbg_task(void *arg)
-{
-    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)arg;
-    uint16_t last_x = 0, last_y = 0;
-    bool last_pressed = false;
-
-    for (;;) {
-        esp_lcd_touch_read_data(tp);
-        uint16_t x, y;
-        uint8_t n = 0;
-        bool pressed = esp_lcd_touch_get_coordinates(tp, &x, &y, NULL, &n, 1);
-        if (pressed && n > 0) {
-            if (!last_pressed || x != last_x || y != last_y) {
-                ESP_LOGI("touch_dbg", "touch: (%u,%u)", (unsigned)x, (unsigned)y);
-            }
-            last_x = x; last_y = y;
-        } else {
-            if (last_pressed) ESP_LOGI("touch_dbg", "touch: released");
-        }
-        last_pressed = pressed && n > 0;
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-}
-
-void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag)
-{
-    (void)tag;
-    xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3*1024, tp, 4, NULL, 0);
 }

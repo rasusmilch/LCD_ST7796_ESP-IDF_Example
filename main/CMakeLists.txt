@@ -1,5 +1,5 @@
 # /main/CMakeLists.txt
-idf_component_register(SRCS "main.c" "touch_ft6336.c" "beeper.c"
+idf_component_register(SRCS "main.c" "touch_ft6336.c" "beeper.c" "touch_debug.c" "led_addr.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver              # GPIO/I2C/SPI/LEDC

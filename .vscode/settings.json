@@ -21,6 +21,8 @@
     "*.ino": "cpp",
     "*.html": "html",
     "*.ats": "pascal",
-    "esp_lvgl_port.h": "c"
+    "esp_lvgl_port.h": "c",
+    "esp_log.h": "c",
+    "esp_check.h": "c"
   }
 }
