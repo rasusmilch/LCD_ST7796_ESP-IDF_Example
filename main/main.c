@@ -43,6 +43,8 @@
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 // -------------------- Pins (from your working bring-up) --------------------
 #define PIN_LCD_RST   15
 #define PIN_LCD_CS    16
@@ -150,6 +152,23 @@ static bool on_color_trans_done_cb(esp_lcd_panel_io_handle_t io,
     return hp_task_woken == pdTRUE;
 }
 
+// Use lv_draw_sw_rgb565_swap() instead
+static inline void swap16_bytes_inplace(uint8_t *buf, size_t len_bytes)
+{
+    // swap bytes within each 16-bit halfword efficiently
+    uint32_t *p32 = (uint32_t *)buf;
+    size_t n32 = len_bytes >> 2;
+
+    for (size_t i = 0; i < n32; i++) {
+        uint32_t v = p32[i];
+        p32[i] = ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
+    }
+    if (len_bytes & 2) { // leftover one 16-bit pixel
+        uint8_t *p = buf + (n32 << 2);
+        uint8_t t = p[0]; p[0] = p[1]; p[1] = t;
+    }
+}
+
 static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     // esp_lcd expects end coords to be EXCLUSIVE
@@ -159,6 +178,8 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     int y2 = area->y2 + 1;
 
     ESP_LOGD(TAG, "flush (%d,%d)-(%d,%d)", x1, y1, x2-1, y2-1);
+
+    lv_draw_sw_rgb565_swap(px_map, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1));
 
     // Start DMA transfer of this area
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_lcd.panel, x1, y1, x2, y2, px_map));
@@ -220,7 +241,7 @@ static void ui_create(void)
 // -------------------- app_main --------------------
 void app_main(void)
 {
-    esp_log_level_set(TAG, ESP_LOG_INFO);   // so ESP_LOGD is visible
+    esp_log_level_set("*", ESP_LOG_DEBUG);   // so ESP_LOGD is visible
 
     ESP_LOGI(TAG, "Init (ESP-IDF + LVGL v9), ST7796 %dx%d, SPI=%u Hz", LCD_H_RES, LCD_V_RES, LCD_SPI_CLOCK_HZ);
     beeper_init_disable();   // keep GPIO39 low at boot
@@ -252,6 +273,7 @@ void app_main(void)
         .flags = {
             .dc_low_on_data = false,     // ST77xx use D/C high for data
             .octal_mode = 0,
+            // .lsb_first = 0,       // (default) keep MSB first on SPI
         }
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(LCD_HOST, &io_cfg, &s_lcd.io));
@@ -260,6 +282,7 @@ void app_main(void)
     esp_lcd_panel_dev_config_t panel_cfg = {
         .reset_gpio_num = PIN_LCD_RST,
         .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,  // ST7796 is BGR by default
+        .data_endian    = LCD_RGB_DATA_ENDIAN_BIG,        // <— FIX: high byte first on the bus
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7796(s_lcd.io, &panel_cfg, &s_lcd.panel));
@@ -279,6 +302,7 @@ void app_main(void)
     lv_display_t *disp = lv_display_create(LCD_H_RES, LCD_V_RES);
     lv_display_set_default(disp);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    // Make LVGL produce RGB565 in big-endian byte order for the panel
     lv_display_set_rotation(disp, lv_rot);  // 0 or 180 ONLY
 
     // Allocate 2 DMA-capable draw buffers in internal RAM (no PSRAM)

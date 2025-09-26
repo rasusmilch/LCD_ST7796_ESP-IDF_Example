@@ -436,7 +436,7 @@
     "LV_ASSERT_HANDLER_INCLUDE": "assert.h",
     "LV_ATTRIBUTE_FAST_MEM_USE_IRAM": false,
     "LV_ATTRIBUTE_MEM_ALIGN_SIZE": 1,
-    "LV_BIG_ENDIAN_SYSTEM": false,
+    "LV_BIG_ENDIAN_SYSTEM": true,
     "LV_BIN_DECODER_RAM_LOAD": false,
     "LV_BUILD_DEMOS": true,
     "LV_BUILD_EXAMPLES": true,

@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "LCD_Example",
-    "project_version":    "52c72c8-dirty",
+    "project_version":    "49b4598-dirty",
     "project_path":       "D:/Coding_Projects/Diesel_Heater_Controller/Code/LCD_Example",
     "idf_path":           "D:/esp/v5.5.1/esp-idf",
     "build_dir":          "D:/Coding_Projects/Diesel_Heater_Controller/Code/LCD_Example",
