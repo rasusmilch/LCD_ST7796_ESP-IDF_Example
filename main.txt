@@ -242,6 +242,8 @@ void led_addr_deinit(void);
 
 #include "touch_ft6336.h"
 #include "touch_debug.h"
+#include "ui_theme.h"
+#include "ui_actions.h"
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 #include "led_addr.h"
@@ -268,8 +270,8 @@ void led_addr_deinit(void);
 #define LCD_SPI_CLOCK_HZ    (20 * 1000 * 1000)   // start conservative; raise after it's stable
 
 // Pick ONE:
-#define ORIENTATION_PORTRAIT
-// #define ORIENTATION_LANDSCAPE
+// #define ORIENTATION_PORTRAIT
+#define ORIENTATION_LANDSCAPE
 
 #if defined(ORIENTATION_PORTRAIT)
   // Panel: native portrait (no swap)
@@ -304,6 +306,47 @@ static const char *TAG = "lvgl_st7796_min";
 #define LVGL_TASK_STACK   (8 * 1024)
 #define LVGL_TASK_PRIO    2
 #define LVGL_TASK_CORE    1   // run LVGL on CPU1
+
+// one global theme (file-scope)
+static ui_theme_t g_theme;
+
+typedef struct {
+    bool status;
+    int status_gpio;
+} AppCtx;
+
+static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
+
+static void act_led(lv_event_t *e, void *user_data)
+{
+    (void)user_data;
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
+
+    // do your thing
+    if (on) {
+        led_addr_fill(0, 0, 0);
+    } else {
+        led_addr_fill(255, 255, 255);
+    }
+    led_addr_show();
+}
+
+static void act_led_toggle(lv_event_t *e, void *user_data)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
+    ESP_LOGI("ui", "LED %s", on ? "ON" : "OFF");
+    // your LED function here, e.g. led_addr_set_all(on ? 0x20:0, on ? 0x20:0, on ? 0x20:0);
+    (void)user_data;
+}
+
+static void act_next(lv_event_t *e, void *user_data)
+{
+    ESP_LOGI("ui", "Next pressed");
+    (void)e; 
+    (void)user_data;
+}
 
 static void lvgl_task(void *arg)
 {
@@ -392,6 +435,25 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     lv_display_flush_ready(disp);
 }
 
+// Simple button click handler
+static void btn_event_cb(lv_event_t *e)
+{
+    static bool led_on = false;
+
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        ESP_LOGI("ui", "Button clicked!");
+        if (led_on) {
+            ESP_ERROR_CHECK(led_addr_set_rgb(0, 0, 0, 0));
+            led_on = false;
+        } else {
+            ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
+            led_on = true;
+        }
+        ESP_ERROR_CHECK(led_addr_show());
+        // (Optional) do something here, e.g. toggle an LED, beep, etc.
+    }
+}
+
 // -------------------- Minimal LVGL UI: RGB bars + white box --------------------
 static void ui_create(void)
 {
@@ -439,6 +501,35 @@ static void ui_create(void)
     lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
     lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_center(lbl);
+
+     // --- Simple button at the bottom ---
+    lv_obj_t *btn = lv_button_create(scr);
+    lv_obj_set_size(btn, 120, 48);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -12);  // bottom-center, 12px up
+    lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, "Press me");
+    lv_obj_center(btn_lbl);
+
+    enum { ACT_LED = 1, ACT_NEXT = 2 };
+
+    // Create buttons
+    lv_obj_t *btn_led = ui_button_on(
+        scr, &g_theme, "LED",
+        UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
+        /*toggle=*/true,
+        act_led, 
+        /*user_data=*/NULL);
+    lv_obj_align(btn_led, LV_ALIGN_BOTTOM_LEFT, 14, -12);
+
+    lv_obj_t *btn_next = ui_button_on(
+        scr, &g_theme, "Next", 
+        UI_BTN_VARIANT_OUTLINE, 
+        false, 
+        act_next,
+        NULL);
+    lv_obj_align(btn_next, LV_ALIGN_BOTTOM_RIGHT, -14, -12);
 }
 
 // -------------------- app_main --------------------
@@ -526,8 +617,8 @@ void app_main(void)
         .rst_io = 21,          // if not wired, set to -1
         .x_max = LCD_V_RES,        // match current orientation
         .y_max = LCD_H_RES,
-        .swap_xy = false,      // we already oriented panel via mirror/swap
-        .mirror_x = false,
+        .swap_xy = true,      // we already oriented panel via mirror/swap
+        .mirror_x = true,
         .mirror_y = false,
         .i2c_clk_hz = 100000,  // 100 kHz to start (raise to 400k if stable)
     };
@@ -551,13 +642,14 @@ void app_main(void)
     backlight_on();
 
     ESP_ERROR_CHECK(led_addr_init(GPIO_NUM_36, 22, false));
-    led_addr_selftest();                 // quick sanity check
+    // led_addr_selftest();                 // quick sanity check
     // Example: set LED 0 to orange, LED 1 to cyan, then show:
-    ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
-    ESP_ERROR_CHECK(led_addr_set_rgb(1, 0, 255, 255));
-    ESP_ERROR_CHECK(led_addr_show());
+    // ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
+    // ESP_ERROR_CHECK(led_addr_set_rgb(1, 0, 255, 255));
+    // ESP_ERROR_CHECK(led_addr_show());
 
     ESP_LOGI(TAG, "UI create");
+    ui_theme_init(&g_theme);
     ui_create();
 
     // Start LVGL on CPU1 and free CPU0 for idle (and Wi-Fi/ISR work)
@@ -692,11 +784,26 @@ void touch_debug_overlay_create(lv_indev_t *indev, bool log_uart, bool show_labe
 
 #include "touch_ft6336.h"
 
-/* ----- LVGL read callback (v9 signature) ----- */
+static const char *TAG = "touch_ft6336";
+
+/* Simple context so callbacks can access the handle */
+typedef struct {
+    i2c_master_bus_handle_t i2c_bus;
+    esp_lcd_panel_io_handle_t io;
+    esp_lcd_touch_handle_t tp;
+} touch_ctx_t;
+
+static touch_ctx_t s_ctx = {0};
+
+/* ---------- LVGL read callback (v9 signature) ---------- */
 static void touch_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    /* s_ctx.tp is set in touch_ft6336_init */
+    if (!s_ctx.tp) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
     esp_lcd_touch_read_data(s_ctx.tp);
 
     uint16_t x = 0, y = 0;
@@ -712,11 +819,10 @@ static void touch_lvgl_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 }
 
-/* ----- Create and return an LVGL input device tied to the FT6336 ----- */
+/* Register LVGL pointer indev for this touch */
 lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp)
 {
-    /* cache handle in our ctx so callbacks can see it */
-    s_ctx.tp = tp;
+    s_ctx.tp = tp;  // cache for callbacks
 
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
@@ -724,7 +830,7 @@ lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp)
     return indev;
 }
 
-/* ----- Simple logger task (polls controller directly) ----- */
+/* ---------- Debug logger task (polls controller directly) ---------- */
 static void touch_dbg_task(void *arg)
 {
     (void)arg;
@@ -732,36 +838,131 @@ static void touch_dbg_task(void *arg)
     bool last_pressed = false;
 
     for (;;) {
-        esp_lcd_touch_read_data(s_ctx.tp);
-        uint16_t x = 0, y = 0;
-        uint8_t n = 0;
-        bool pressed = esp_lcd_touch_get_coordinates(s_ctx.tp, &x, &y, NULL, &n, 1);
+        if (s_ctx.tp) {
+            esp_lcd_touch_read_data(s_ctx.tp);
+            uint16_t x = 0, y = 0;
+            uint8_t n = 0;
+            bool pressed = esp_lcd_touch_get_coordinates(s_ctx.tp, &x, &y, NULL, &n, 1);
 
-        if (pressed && n > 0) {
-            if (!last_pressed || x != last_x || y != last_y) {
-                ESP_LOGI("touch_dbg", "touch: (%u,%u)", (unsigned)x, (unsigned)y);
+            if (pressed && n > 0) {
+                if (!last_pressed || x != last_x || y != last_y) {
+                    ESP_LOGI("touch_dbg", "touch: (%u,%u)", (unsigned)x, (unsigned)y);
+                }
+                last_x = x; last_y = y;
+            } else {
+                if (last_pressed) ESP_LOGI("touch_dbg", "touch: released");
             }
-            last_x = x; last_y = y;
-        } else {
-            if (last_pressed) ESP_LOGI("touch_dbg", "touch: released");
+            last_pressed = pressed && n > 0;
         }
-        last_pressed = pressed && n > 0;
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 }
 
 void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag)
 {
-    (void)tp; (void)tag;
-    /* s_ctx.tp already set; just spawn the logger */
+    (void)tag;
+    if (tp) s_ctx.tp = tp;
     xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3*1024, NULL, 4, NULL, 0);
 }
 
-/* ----- Compatibility wrapper to match your existing main.c call ----- */
+/* Compatibility wrapper to match your existing call-site */
 void touch_dbg_start(lv_indev_t *indev)
 {
-    (void)indev; /* we log from the controller directly */
+    (void)indev;
     xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3*1024, NULL, 4, NULL, 0);
+}
+
+/* ---------- Initialization (I2C bus + FT6336 via FT5x06 driver) ---------- */
+esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_t *out_tp)
+{
+    ESP_RETURN_ON_FALSE(cfg, ESP_ERR_INVALID_ARG, TAG, "cfg is NULL");
+
+    // INT pin: input with INTERNAL pull-up (you have external pull-ups on SDA/SCL only)
+    if (cfg->int_io >= 0) {
+        gpio_config_t gi = {
+            .pin_bit_mask = 1ULL << cfg->int_io,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = 1,
+            .pull_down_en = 0,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&gi), TAG, "INT pin cfg failed");
+    }
+
+    // Optional reset pin
+    if (cfg->rst_io >= 0) {
+        gpio_config_t gr = {
+            .pin_bit_mask = 1ULL << cfg->rst_io,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = 0,
+            .pull_down_en = 0,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&gr), TAG, "RST pin cfg failed");
+        // active-low reset pulse
+        gpio_set_level(cfg->rst_io, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(cfg->rst_io, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    // I2C master bus (EXTERNAL pull-ups on SDA/SCL -> disable internal)
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = 0,
+        .sda_io_num = cfg->i2c_sda_io,
+        .scl_io_num = cfg->i2c_scl_io,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = {.enable_internal_pullup = 0},
+    };
+    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_ctx.i2c_bus), TAG, "i2c bus create failed");
+
+    // Panel IO wrapper for the FT5x06/FT6336 touch over I2C
+#ifdef ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG
+    esp_lcd_panel_io_i2c_config_t io_cfg = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
+#else
+    esp_lcd_panel_io_i2c_config_t io_cfg = {
+        .dev_addr = 0x38,
+        .control_phase_bytes = 1,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .xfer_queue_depth = 0,
+    };
+#endif
+    io_cfg.dev_addr = 0x38;  // FT6336/FT5x06 default
+    io_cfg.scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : 100000; // 100k first; 400k once stable
+
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_ctx.i2c_bus, &io_cfg, &s_ctx.io),
+                        TAG, "panel io i2c failed");
+
+    // Touch config
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = cfg->x_max,
+        .y_max = cfg->y_max,
+        .rst_gpio_num = cfg->rst_io,
+        .int_gpio_num = cfg->int_io,
+        .levels = {
+            .reset = 0,     // active low reset
+            .interrupt = 0, // INT goes low on touch for FT6336
+        },
+        .flags = {
+            .swap_xy = cfg->swap_xy,
+            .mirror_x = cfg->mirror_x,
+            .mirror_y = cfg->mirror_y,
+        },
+    };
+
+    esp_err_t err = esp_lcd_touch_new_i2c_ft5x06(s_ctx.io, &tp_cfg, &s_ctx.tp);
+    ESP_RETURN_ON_ERROR(err, TAG, "FT5x06/FT6336 init failed");
+
+    ESP_LOGI(TAG, "FT5x06/FT6336 touch ready at 0x%02X (%ux%u) swap_xy=%d mx=%d my=%d",
+             io_cfg.dev_addr, (unsigned)tp_cfg.x_max, (unsigned)tp_cfg.y_max,
+             (int)tp_cfg.flags.swap_xy, (int)tp_cfg.flags.mirror_x, (int)tp_cfg.flags.mirror_y);
+
+    if (out_tp) *out_tp = s_ctx.tp;
+    return ESP_OK;
 }
 
 --- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.c ---
@@ -805,3 +1006,231 @@ void touch_dbg_start(lv_indev_t *indev);
 #endif
 
 --- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_actions.c ---
+#include "ui_actions.h"
+
+typedef struct {
+    ui_btn_handler_t fn;
+    void *user_data;
+} _ui_cb_wrap_t;
+
+static void _btn_trampoline(lv_event_t *e)
+{
+    _ui_cb_wrap_t *w = (_ui_cb_wrap_t *)lv_event_get_user_data(e);
+    if (w && w->fn) w->fn(e, w->user_data);
+}
+
+static void _btn_free_on_delete(lv_event_t *e)
+{
+    _ui_cb_wrap_t *w = (_ui_cb_wrap_t *)lv_event_get_user_data(e);
+    if (w) lv_free(w);
+}
+
+lv_obj_t *ui_button_on(lv_obj_t *parent, ui_theme_t *t,
+                       const char *text, uint32_t variants, bool toggle,
+                       ui_btn_handler_t fn, void *user_data)
+{
+    lv_obj_t *btn = ui_button_create(parent, t, text, variants, toggle);
+
+    // Wrap your function pointer + payload into one user_data block
+    _ui_cb_wrap_t *w = (_ui_cb_wrap_t *)lv_malloc(sizeof(*w));
+    w->fn = fn;
+    w->user_data = user_data;
+
+    // For toggles, styles flip via LV_STATE_CHECKED and we listen to VALUE_CHANGED.
+    lv_event_code_t code = toggle ? LV_EVENT_VALUE_CHANGED : LV_EVENT_CLICKED;
+
+    lv_obj_add_event_cb(btn, _btn_trampoline, code, w);
+    // Ensure wrapper is freed when the button is deleted
+    lv_obj_add_event_cb(btn, _btn_free_on_delete, LV_EVENT_DELETE, w);
+
+    return btn;
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_actions.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_actions.h ---
+#pragma once
+#include "lvgl.h"
+#include <stdint.h>
+#include "ui_theme.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+
+// Your preferred callback signature
+typedef void (*ui_btn_handler_t)(lv_event_t *e, void *user_data);
+
+// Convenience: build + wire a handler with your signature.
+// If toggle==true, event will be LV_EVENT_VALUE_CHANGED; otherwise LV_EVENT_CLICKED.
+lv_obj_t *ui_button_on(lv_obj_t *parent, ui_theme_t *t,
+                       const char *text, uint32_t variants, bool toggle,
+                       ui_btn_handler_t fn, void *user_data);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_actions.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.c ---
+#include "ui_theme.h"
+
+static lv_color_t press_darken(const lv_color_filter_dsc_t *dsc, lv_color_t c, lv_opa_t opa)
+{
+    LV_UNUSED(dsc);
+    return lv_color_darken(c, opa);
+}
+
+void ui_theme_init(ui_theme_t *t)
+{
+    lv_style_init(&t->btn_base);
+    lv_style_set_radius(&t->btn_base, 10);
+    lv_style_set_bg_opa(&t->btn_base, LV_OPA_COVER);
+    lv_style_set_pad_all(&t->btn_base, 10);
+    lv_style_set_border_width(&t->btn_base, 2);
+    lv_style_set_border_opa(&t->btn_base, LV_OPA_20);
+
+    // Pressed overlay (darken everything a bit)
+    lv_color_filter_dsc_init(&t->press_filter, [](const lv_color_filter_dsc_t*, lv_color_t c, lv_opa_t o){
+        return lv_color_darken(c, o);
+    });
+    lv_style_init(&t->btn_pressed);
+    lv_style_set_color_filter_dsc(&t->btn_pressed, &t->press_filter);
+    lv_style_set_color_filter_opa(&t->btn_pressed, LV_OPA_20);
+
+    // Primary OFF
+    lv_style_init(&t->btn_primary);
+    lv_style_set_bg_color(&t->btn_primary, lv_palette_lighten(LV_PALETTE_BLUE, 4));
+    lv_style_set_bg_grad_color(&t->btn_primary, lv_palette_main(LV_PALETTE_BLUE));
+    lv_style_set_bg_grad_dir(&t->btn_primary, LV_GRAD_DIR_VER);
+    lv_style_set_border_color(&t->btn_primary, lv_palette_darken(LV_PALETTE_BLUE, 2));
+
+    // Primary ON (checked)
+    lv_style_init(&t->btn_primary_on);
+    lv_style_set_bg_color(&t->btn_primary_on, lv_palette_main(LV_PALETTE_BLUE));
+    lv_style_set_bg_grad_color(&t->btn_primary_on, lv_palette_darken(LV_PALETTE_BLUE, 1));
+    lv_style_set_border_color(&t->btn_primary_on, lv_palette_darken(LV_PALETTE_BLUE, 3));
+
+    // Danger OFF
+    lv_style_init(&t->btn_danger);
+    lv_style_set_bg_color(&t->btn_danger, lv_palette_lighten(LV_PALETTE_RED, 4));
+    lv_style_set_bg_grad_color(&t->btn_danger, lv_palette_main(LV_PALETTE_RED));
+    lv_style_set_bg_grad_dir(&t->btn_danger, LV_GRAD_DIR_VER);
+    lv_style_set_border_color(&t->btn_danger, lv_palette_darken(LV_PALETTE_RED, 2));
+
+    // Danger ON (checked)
+    lv_style_init(&t->btn_danger_on);
+    lv_style_set_bg_color(&t->btn_danger_on, lv_palette_main(LV_PALETTE_RED));
+    lv_style_set_bg_grad_color(&t->btn_danger_on, lv_palette_darken(LV_PALETTE_RED, 1));
+    lv_style_set_border_color(&t->btn_danger_on, lv_palette_darken(LV_PALETTE_RED, 3));
+
+    // Outline OFF
+    lv_style_init(&t->btn_outline);
+    lv_style_set_bg_opa(&t->btn_outline, LV_OPA_TRANSP);
+    lv_style_set_border_color(&t->btn_outline, lv_palette_main(LV_PALETTE_GREY));
+    lv_style_set_text_color(&t->btn_outline, lv_palette_main(LV_PALETTE_GREY));
+
+    // Outline ON (checked) — fill it to show “active”
+    lv_style_init(&t->btn_outline_on);
+    lv_style_set_bg_opa(&t->btn_outline_on, LV_OPA_COVER);
+    lv_style_set_bg_color(&t->btn_outline_on, lv_palette_main(LV_PALETTE_GREY));
+    lv_style_set_text_color(&t->btn_outline_on, lv_color_white());
+
+    // Round helper
+    lv_style_init(&t->btn_round);
+    lv_style_set_radius(&t->btn_round, LV_RADIUS_CIRCLE);
+
+    // Label style
+    lv_style_init(&t->label_on_btn);
+    lv_style_set_text_color(&t->label_on_btn, lv_color_black());
+}
+
+
+lv_obj_t *ui_button_create(lv_obj_t *parent, ui_theme_t *t,
+                           const char *text, uint32_t variants, bool toggle)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_remove_style_all(btn);
+
+    // Base + pressed overlay
+    lv_obj_add_style(btn, &t->btn_base, 0);
+    lv_obj_add_style(btn, &t->btn_pressed, LV_STATE_PRESSED);
+
+    // Variants (OFF state)
+    if (variants & UI_BTN_VARIANT_PRIMARY) lv_obj_add_style(btn, &t->btn_primary, 0);
+    if (variants & UI_BTN_VARIANT_DANGER)  lv_obj_add_style(btn, &t->btn_danger,  0);
+    if (variants & UI_BTN_VARIANT_OUTLINE) lv_obj_add_style(btn, &t->btn_outline, 0);
+    if (variants & UI_BTN_VARIANT_ROUND)   lv_obj_add_style(btn, &t->btn_round,   0);
+
+    // Variants (ON state) — these are only active when LV_STATE_CHECKED is set
+    if (variants & UI_BTN_VARIANT_PRIMARY) lv_obj_add_style(btn, &t->btn_primary_on, LV_STATE_CHECKED);
+    if (variants & UI_BTN_VARIANT_DANGER)  lv_obj_add_style(btn, &t->btn_danger_on,  LV_STATE_CHECKED);
+    if (variants & UI_BTN_VARIANT_OUTLINE) lv_obj_add_style(btn, &t->btn_outline_on, LV_STATE_CHECKED);
+
+    if (toggle) lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
+
+    // Label
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_add_style(label, &t->label_on_btn, 0);
+    lv_label_set_text(label, text ? text : "Button");
+    lv_obj_center(label);
+
+    return btn;
+}
+
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.h ---
+#pragma once
+#include "lvgl.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct ui_theme_t {
+    // Base/overlays
+    lv_style_t btn_base;
+    lv_style_t btn_pressed;
+
+    // Variants (OFF state = default)
+    lv_style_t btn_primary;
+    lv_style_t btn_danger;
+    lv_style_t btn_outline;
+    lv_style_t btn_round;       // radius helper
+    lv_style_t label_on_btn;
+
+    // Variants (ON state = when LV_STATE_CHECKED is set)
+    lv_style_t btn_primary_on;
+    lv_style_t btn_danger_on;
+    lv_style_t btn_outline_on;
+
+    // Press effect
+    lv_color_filter_dsc_t press_filter;
+} ui_theme_t;
+
+
+// Variants (bitmask)
+enum {
+    UI_BTN_VARIANT_PRIMARY = 1 << 0,
+    UI_BTN_VARIANT_DANGER  = 1 << 1,
+    UI_BTN_VARIANT_OUTLINE = 1 << 2,
+    UI_BTN_VARIANT_ROUND   = 1 << 3,
+    UI_BTN_VARIANT_SMALL   = 1 << 4,  // slightly smaller paddings
+};
+
+// Init once after lv_init()
+void ui_theme_init(ui_theme_t *t);
+
+// Create a styled button (no action wiring)
+lv_obj_t *ui_button_create(lv_obj_t *parent, ui_theme_t *t,
+                           const char *text, uint32_t variants, bool toggle);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.h ---

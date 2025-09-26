@@ -21,6 +21,7 @@
 //   - SPI clock too high on long wires; start at 20 MHz or lower
 //
 // This example handles those points explicitly.
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 
 #include <inttypes.h>
 #include <string.h>
@@ -43,11 +44,11 @@
 
 #include "touch_ft6336.h"
 #include "touch_debug.h"
+#include "ui_theme.h"
+#include "ui_actions.h"
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 #include "led_addr.h"
-
-#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 
 // -------------------- Pins (from your working bring-up) --------------------
 #define PIN_LCD_RST   15
@@ -69,8 +70,8 @@
 #define LCD_SPI_CLOCK_HZ    (20 * 1000 * 1000)   // start conservative; raise after it's stable
 
 // Pick ONE:
-#define ORIENTATION_PORTRAIT
-// #define ORIENTATION_LANDSCAPE
+// #define ORIENTATION_PORTRAIT
+#define ORIENTATION_LANDSCAPE
 
 #if defined(ORIENTATION_PORTRAIT)
   // Panel: native portrait (no swap)
@@ -105,6 +106,47 @@ static const char *TAG = "lvgl_st7796_min";
 #define LVGL_TASK_STACK   (8 * 1024)
 #define LVGL_TASK_PRIO    2
 #define LVGL_TASK_CORE    1   // run LVGL on CPU1
+
+// one global theme (file-scope)
+static ui_theme_t g_theme;
+
+typedef struct {
+    bool status;
+    int status_gpio;
+} AppCtx;
+
+static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
+
+static void act_led(lv_event_t *e, void *user_data)
+{
+    (void)user_data;
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
+
+    // do your thing
+    if (on) {
+        led_addr_fill(0, 0, 0);
+    } else {
+        led_addr_fill(255, 255, 255);
+    }
+    led_addr_show();
+}
+
+static void act_led_toggle(lv_event_t *e, void *user_data)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
+    ESP_LOGI("ui", "LED %s", on ? "ON" : "OFF");
+    // your LED function here, e.g. led_addr_set_all(on ? 0x20:0, on ? 0x20:0, on ? 0x20:0);
+    (void)user_data;
+}
+
+static void act_next(lv_event_t *e, void *user_data)
+{
+    ESP_LOGI("ui", "Next pressed");
+    (void)e; 
+    (void)user_data;
+}
 
 static void lvgl_task(void *arg)
 {
@@ -193,6 +235,25 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     lv_display_flush_ready(disp);
 }
 
+// Simple button click handler
+static void btn_event_cb(lv_event_t *e)
+{
+    static bool led_on = false;
+
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        ESP_LOGI("ui", "Button clicked!");
+        if (led_on) {
+            ESP_ERROR_CHECK(led_addr_set_rgb(0, 0, 0, 0));
+            led_on = false;
+        } else {
+            ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
+            led_on = true;
+        }
+        ESP_ERROR_CHECK(led_addr_show());
+        // (Optional) do something here, e.g. toggle an LED, beep, etc.
+    }
+}
+
 // -------------------- Minimal LVGL UI: RGB bars + white box --------------------
 static void ui_create(void)
 {
@@ -240,6 +301,35 @@ static void ui_create(void)
     lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
     lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_center(lbl);
+
+     // --- Simple button at the bottom ---
+    lv_obj_t *btn = lv_button_create(scr);
+    lv_obj_set_size(btn, 120, 48);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -12);  // bottom-center, 12px up
+    lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_lbl = lv_label_create(btn);
+    lv_label_set_text(btn_lbl, "Press me");
+    lv_obj_center(btn_lbl);
+
+    enum { ACT_LED = 1, ACT_NEXT = 2 };
+
+    // Create buttons
+    lv_obj_t *btn_led = ui_button_on(
+        scr, &g_theme, "LED",
+        UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
+        /*toggle=*/true,
+        act_led, 
+        /*user_data=*/NULL);
+    lv_obj_align(btn_led, LV_ALIGN_BOTTOM_LEFT, 14, -12);
+
+    lv_obj_t *btn_next = ui_button_on(
+        scr, &g_theme, "Next", 
+        UI_BTN_VARIANT_OUTLINE, 
+        false, 
+        act_next,
+        NULL);
+    lv_obj_align(btn_next, LV_ALIGN_BOTTOM_RIGHT, -14, -12);
 }
 
 // -------------------- app_main --------------------
@@ -327,8 +417,8 @@ void app_main(void)
         .rst_io = 21,          // if not wired, set to -1
         .x_max = LCD_V_RES,        // match current orientation
         .y_max = LCD_H_RES,
-        .swap_xy = false,      // we already oriented panel via mirror/swap
-        .mirror_x = false,
+        .swap_xy = true,      // we already oriented panel via mirror/swap
+        .mirror_x = true,
         .mirror_y = false,
         .i2c_clk_hz = 100000,  // 100 kHz to start (raise to 400k if stable)
     };
@@ -352,13 +442,14 @@ void app_main(void)
     backlight_on();
 
     ESP_ERROR_CHECK(led_addr_init(GPIO_NUM_36, 22, false));
-    led_addr_selftest();                 // quick sanity check
+    // led_addr_selftest();                 // quick sanity check
     // Example: set LED 0 to orange, LED 1 to cyan, then show:
-    ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
-    ESP_ERROR_CHECK(led_addr_set_rgb(1, 0, 255, 255));
-    ESP_ERROR_CHECK(led_addr_show());
+    // ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
+    // ESP_ERROR_CHECK(led_addr_set_rgb(1, 0, 255, 255));
+    // ESP_ERROR_CHECK(led_addr_show());
 
     ESP_LOGI(TAG, "UI create");
+    ui_theme_init(&g_theme);
     ui_create();
 
     // Start LVGL on CPU1 and free CPU0 for idle (and Wi-Fi/ISR work)
