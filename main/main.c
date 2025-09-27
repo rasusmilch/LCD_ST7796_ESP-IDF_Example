@@ -21,7 +21,9 @@
 //   - SPI clock too high on long wires; start at 20 MHz or lower
 //
 // This example handles those points explicitly.
+#undef LOG_LOCAL_LEVEL
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 
 #include <inttypes.h>
 #include <string.h>
@@ -45,7 +47,7 @@
 #include "touch_ft6336.h"
 #include "touch_debug.h"
 #include "ui_theme.h"
-#include "ui_actions.h"
+#include "ui_pages.h"
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 #include "led_addr.h"
@@ -115,37 +117,24 @@ typedef struct {
     int status_gpio;
 } AppCtx;
 
-static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
 
-static void act_led(lv_event_t *e, void *user_data)
-{
-    (void)user_data;
+static uint32_t g_ui_flags = 0;   // UIF_* mask at runtime
+static bool g_adv_enabled = false; // flip this when user enters Advanced
+
+static void act_led(lv_event_t *e) {
+    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;   // for toggles
     lv_obj_t *btn = lv_event_get_target(e);
     bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
 
-    // do your thing
-    if (on) {
-        led_addr_fill(0, 0, 0);
-    } else {
-        led_addr_fill(255, 255, 255);
-    }
+    if (on) { led_addr_fill(0,0,0); }
+    else    { led_addr_fill(255,255,255); }
     led_addr_show();
 }
 
-static void act_led_toggle(lv_event_t *e, void *user_data)
-{
-    lv_obj_t *btn = lv_event_get_target(e);
-    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
-    ESP_LOGI("ui", "LED %s", on ? "ON" : "OFF");
-    // your LED function here, e.g. led_addr_set_all(on ? 0x20:0, on ? 0x20:0, on ? 0x20:0);
-    (void)user_data;
-}
-
-static void act_next(lv_event_t *e, void *user_data)
-{
+static void act_next(lv_event_t *e) {
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     ESP_LOGI("ui", "Next pressed");
     (void)e; 
-    (void)user_data;
 }
 
 static void lvgl_task(void *arg)
@@ -235,25 +224,6 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     lv_display_flush_ready(disp);
 }
 
-// Simple button click handler
-static void btn_event_cb(lv_event_t *e)
-{
-    static bool led_on = false;
-
-    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-        ESP_LOGI("ui", "Button clicked!");
-        if (led_on) {
-            ESP_ERROR_CHECK(led_addr_set_rgb(0, 0, 0, 0));
-            led_on = false;
-        } else {
-            ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
-            led_on = true;
-        }
-        ESP_ERROR_CHECK(led_addr_show());
-        // (Optional) do something here, e.g. toggle an LED, beep, etc.
-    }
-}
-
 // -------------------- Minimal LVGL UI: RGB bars + white box --------------------
 static void ui_create(void)
 {
@@ -302,34 +272,47 @@ static void ui_create(void)
     lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_center(lbl);
 
-     // --- Simple button at the bottom ---
-    lv_obj_t *btn = lv_button_create(scr);
-    lv_obj_set_size(btn, 120, 48);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -12);  // bottom-center, 12px up
-    lv_obj_add_event_cb(btn, btn_event_cb, LV_EVENT_CLICKED, NULL);
+    // Build buttons from a descriptor table
+    static const ui_widget_desc_t HOME_WIDGETS[] = {
+        // LED button (bottom-left), requires POWER
+        {
+            .type = UIW_BUTTON,
+            .align = LV_ALIGN_BOTTOM_LEFT, .x_ofs = 14, .y_ofs = -12,
+            .w = 96, .h = 48,
+            .text = "LED",
+            .variants = UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
+            .toggle = true,
+            .on_event = act_led, .user_data = NULL,
+            .require_mask = UIF_POWER, .block_mask = 0,
+            .groups_mask = UGRP_DEFAULT
+        },
+        // Next button (bottom-right), requires POWER AND ADVANCED
+        {
+            .type = UIW_BUTTON,
+            .align = LV_ALIGN_BOTTOM_RIGHT, .x_ofs = -14, .y_ofs = -12,
+            .w = 96, .h = 48,
+            .text = "Next",
+            .variants = UI_BTN_VARIANT_OUTLINE,
+            .toggle = false,
+            .on_event = act_next, .user_data = NULL,
+            .require_mask = (UIF_POWER | UIF_ADVANCED), .block_mask = 0,
+            .groups_mask = UGRP_DEFAULT
+        },
+    };
 
-    lv_obj_t *btn_lbl = lv_label_create(btn);
-    lv_label_set_text(btn_lbl, "Press me");
-    lv_obj_center(btn_lbl);
+    static const ui_page_desc_t HOME_PAGE = {
+        .name = "Home",
+        .widgets = HOME_WIDGETS,
+        .widget_count = sizeof(HOME_WIDGETS) / sizeof(HOME_WIDGETS[0]),
+    };
 
-    enum { ACT_LED = 1, ACT_NEXT = 2 };
+    ui_page_handle_t *home = ui_page_build(scr, &g_theme, &HOME_PAGE);
+    // Compose flags from current app state
+    g_ui_flags = UIF_POWER;                 // enable “LED” for testing
+    g_ui_flags |= UIF_ADVANCED;          // enable “Next” too, if you want
+    ui_page_set_flags(home, g_ui_flags);
+    ui_page_apply(home);
 
-    // Create buttons
-    lv_obj_t *btn_led = ui_button_on(
-        scr, &g_theme, "LED",
-        UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
-        /*toggle=*/true,
-        act_led, 
-        /*user_data=*/NULL);
-    lv_obj_align(btn_led, LV_ALIGN_BOTTOM_LEFT, 14, -12);
-
-    lv_obj_t *btn_next = ui_button_on(
-        scr, &g_theme, "Next", 
-        UI_BTN_VARIANT_OUTLINE, 
-        false, 
-        act_next,
-        NULL);
-    lv_obj_align(btn_next, LV_ALIGN_BOTTOM_RIGHT, -14, -12);
 }
 
 // -------------------- app_main --------------------
@@ -425,7 +408,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(touch_ft6336_init(&tcfg, &tp));
     lv_indev_t *indev = touch_lvgl_register(tp);
-    touch_dbg_start(indev);               // optional console logs
+    lv_indev_set_disp(indev, lv_display_get_default());  // explicit association
+    // touch_dbg_start(indev);               // optional console logs
 
     // (Optional) On-screen red dot and "(x,y)" label + UART logs:
     touch_debug_overlay_create(indev, /*log_uart=*/true, /*show_label=*/true);

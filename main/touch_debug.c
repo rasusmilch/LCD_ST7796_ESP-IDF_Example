@@ -57,7 +57,7 @@ void touch_debug_overlay_create(lv_indev_t *indev, bool log_uart, bool show_labe
 
     lv_obj_t *layer = lv_layer_top();
 
-    // Red dot cursor
+    // Red dot cursor (passive)
     s_dot = lv_obj_create(layer);
     lv_obj_remove_style_all(s_dot);
     lv_obj_set_size(s_dot, 12, 12);
@@ -67,15 +67,20 @@ void touch_debug_overlay_create(lv_indev_t *indev, bool log_uart, bool show_labe
     lv_obj_set_style_outline_width(s_dot, 1, 0);
     lv_obj_set_style_outline_color(s_dot, lv_color_white(), 0);
     lv_obj_add_flag(s_dot, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN); // hidden until pressed
+    lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);     // hidden until pressed
+    // critical lines: keep it non-interactive
+    lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Optional coordinate label
+    // Optional coordinate label (also passive)
     if(s_show_label) {
         s_lbl = lv_label_create(layer);
         lv_label_set_text(s_lbl, "(---,---)");
         lv_obj_set_style_text_color(s_lbl, lv_palette_main(LV_PALETTE_YELLOW), 0);
         lv_obj_set_style_bg_opa(s_lbl, LV_OPA_TRANSP, 0);
         lv_obj_set_pos(s_lbl, 2, 2);
+        lv_obj_clear_flag(s_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_lbl, LV_OBJ_FLAG_SCROLLABLE);
     }
 
     // Poll at ~30 Hz
