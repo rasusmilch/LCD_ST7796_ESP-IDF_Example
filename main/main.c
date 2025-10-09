@@ -139,6 +139,23 @@ typedef struct {
 
 static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
 
+static esp_err_t i2c_bus_shared_init(void)
+{
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port   = 0,                    /* I2C_NUM_0 */
+        .sda_io_num = PIN_I2C_SDA,
+        .scl_io_num = PIN_I2C_SCL,
+        .glitch_ignore_cnt = 7,
+        .intr_priority     = 0,
+        .trans_queue_depth = 0,
+        .flags = {
+            .enable_internal_pullup = 0,   /* you have external pull-ups */
+        }
+    };
+    return i2c_new_master_bus(&bus_cfg, &g_i2c_bus);
+}
+
 static void demo_prefs_boot_counter(fm24cl64_t *fram)
 {
     prefs_store_t ps;
@@ -372,26 +389,33 @@ void app_main(void)
 
 
     // -------------------- I2C BUS (shared) --------------------
-    i2c_master_bus_config_t bus_cfg = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = 0,                 // I2C0
-        .sda_io_num = PIN_I2C_SDA,
-        .scl_io_num = PIN_I2C_SCL,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags = { .enable_internal_pullup = 0 } // you have external pull-ups
-    };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &g_i2c_bus));
 
-    // -------------------- FRAM (FM24CL64) on shared I2C bus --------------------
-    fm24cl64_config_t fcfg = {
-        .bus          = g_i2c_bus,
-        .i2c_addr     = 0x50,     // FM24CL64 default (A2..A0 = 0)
-        .scl_speed_hz = 100000
-    };
-    ESP_ERROR_CHECK(fm24cl64_init(&fcfg, &g_fram));
+    /* 1) Shared I2C bus */
+    ESP_ERROR_CHECK(i2c_bus_shared_init());
 
+    /* 2) FRAM on the same bus */
+    fm24cl64_t fram = {0};
+    ESP_ERROR_CHECK(fm24cl64_init_on_bus(g_i2c_bus, 0x50, &fram));   /* 0x50..0x57 depending on A2/A1/A0 */
+
+    /* 3) Touch on the same bus */
+    esp_lcd_touch_handle_t tp = NULL;
+    touch_ft6336_cfg_t tcfg = {
+        .i2c_sda_io = PIN_I2C_SDA,        /* not used by init_on_bus, but fine to keep */
+        .i2c_scl_io = PIN_I2C_SCL,
+        .int_io     = 40,                  /* your INT pin */
+        .rst_io     = -1,                  /* no reset line wired? use -1 */
+        .x_max      = LCD_H_RES,           /* e.g. 480 */
+        .y_max      = LCD_V_RES,           /* e.g. 320 */
+        /* Adjust these three if axes look swapped or mirrored */
+        .swap_xy    = false,               /* true if FT6336 is mounted rotated */
+        .mirror_x   = true,                /* match your LCD MADCTL orientation */
+        .mirror_y   = false,
+        .i2c_clk_hz = 400000,              /* bus speed already set by bus init */
+    };
+    ESP_ERROR_CHECK(touch_ft6336_init_on_bus(g_i2c_bus, &tcfg, &tp));
+
+    lv_indev_t *indev = touch_lvgl_register(tp, tcfg.x_max, tcfg.y_max);
+    
     // FRAM is ready at this point
     demo_prefs_boot_counter(&g_fram);
 
@@ -463,24 +487,6 @@ void app_main(void)
     lv_display_set_buffers(disp, buf1, buf2, buf_size_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
 
-    touch_ft6336_cfg_t tcfg = {
-        .i2c_sda_io = PIN_I2C_SDA,   // ignored by _on_bus variant
-        .i2c_scl_io = PIN_I2C_SCL,   // ignored by _on_bus variant
-        .int_io = PIN_TOUCH_INT,
-        .rst_io = PIN_TOUCH_RST,
-        .x_max = LCD_H_RES,     // 480
-        .y_max = LCD_V_RES,     // 320
-        .swap_xy = false,
-        .mirror_x = true,
-        .mirror_y = false,
-        .i2c_clk_hz = 100000,
-    };
-
-    esp_lcd_touch_handle_t tp = NULL;
-
-    ESP_ERROR_CHECK(touch_ft6336_init_on_bus(g_i2c_bus, &tcfg, &tp));
-
-    lv_indev_t *indev = touch_lvgl_register(tp);
     lv_indev_set_display(indev, lv_display_get_default());   // <-- add this line
     touch_debug_overlay_create(indev, true, true);           // your red-dot/coords overlay
     // touch_debug_start(tp, "touch");                          // start the logger with the handle

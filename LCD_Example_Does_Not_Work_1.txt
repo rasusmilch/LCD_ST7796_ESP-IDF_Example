@@ -1,0 +1,1818 @@
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\beeper.c ---
+// /main/beeper.c
+#include "driver/gpio.h"
+#include "beeper.h"
+
+// Why: set level before direction to prevent an audible glitch on transition.
+void beeper_init_disable(void)
+{
+    gpio_reset_pin(GPIO_BEEPER);
+    gpio_set_level(GPIO_BEEPER, 0);
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << GPIO_BEEPER,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&cfg);
+    gpio_set_level(GPIO_BEEPER, 0);
+}
+
+void beeper_on(void)  { gpio_set_level(GPIO_BEEPER, 1); }
+void beeper_off(void) { gpio_set_level(GPIO_BEEPER, 0); }
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\beeper.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\beeper.h ---
+// /main/beeper.h
+#pragma once
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define GPIO_BEEPER 39  // beeper line
+
+// Drive beeper pin LOW and configure as output (do this at boot).
+void beeper_init_disable(void);
+
+// Convenience toggles (active-high beeper assumed).
+void beeper_on(void);
+void beeper_off(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\beeper.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fm24cl64.c ---
+#include "fm24cl64.h"
+#include <string.h>
+
+esp_err_t fm24cl64_init(const fm24cl64_config_t *cfg, fm24cl64_t *out) {
+    if (!cfg || !out || !cfg->bus) return ESP_ERR_INVALID_ARG;
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = cfg->i2c_addr ? cfg->i2c_addr : 0x50,
+        .scl_speed_hz    = cfg->scl_speed_hz ? cfg->scl_speed_hz : 400000
+    };
+    out->bus = cfg->bus;
+    out->i2c_addr = dev_cfg.device_address;
+
+    return i2c_master_bus_add_device(cfg->bus, &dev_cfg, &out->dev);
+}
+
+static inline esp_err_t write_addr_then_rx(fm24cl64_t *dev, uint16_t addr,
+                                           void *rx, size_t rxlen, int timeout_ms)
+{
+    uint8_t a[2] = { (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF) };
+    return i2c_master_transmit_receive(dev->dev, a, 2, rx, rxlen, timeout_ms);
+}
+
+static inline esp_err_t tx_addr_then_tx_data(fm24cl64_t *dev, uint16_t addr,
+                                             const uint8_t *data, size_t len, int timeout_ms)
+{
+    // Chunk to keep stack small and transactions reasonable
+    uint8_t buf[2 + 128];
+    while (len) {
+        size_t n = len > 128 ? 128 : len;
+        buf[0] = (uint8_t)(addr >> 8);
+        buf[1] = (uint8_t)(addr & 0xFF);
+        memcpy(&buf[2], data, n);
+        esp_err_t err = i2c_master_transmit(dev->dev, buf, 2 + n, timeout_ms);
+        if (err != ESP_OK) return err;
+        addr += n;
+        data += n;
+        len  -= n;
+    }
+    return ESP_OK;
+}
+
+esp_err_t fm24cl64_read(fm24cl64_t *dev, uint16_t addr, void *data, size_t len) {
+    if (!dev || !data) return ESP_ERR_INVALID_ARG;
+    if ((uint32_t)addr + len > 8192) return ESP_ERR_INVALID_SIZE;
+    return write_addr_then_rx(dev, addr, data, len, 50);
+}
+
+esp_err_t fm24cl64_write(fm24cl64_t *dev, uint16_t addr, const void *data, size_t len) {
+    if (!dev || !data) return ESP_ERR_INVALID_ARG;
+    if ((uint32_t)addr + len > 8192) return ESP_ERR_INVALID_SIZE;
+    // FRAM has no write latency/erase cycles. Just transmit bytes.
+    return tx_addr_then_tx_data(dev, addr, (const uint8_t *)data, len, 50);
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fm24cl64.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fm24cl64.h ---
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include "esp_err.h"
+#include "driver/i2c_master.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* 64-kbit (8 KiB) FRAM with 16-bit word address.
+ * Default 7-bit I2C address is 0x50 (A2..A0 = 0).
+ */
+
+typedef struct {
+    i2c_master_bus_handle_t bus;   // existing I2C master bus (from i2c_new_master_bus)
+    uint8_t                  i2c_addr;      // 0x50..0x57 according to A2/A1/A0
+    uint32_t                 scl_speed_hz;  // e.g. 400000
+} fm24cl64_config_t;
+
+typedef struct {
+    i2c_master_bus_handle_t  bus;
+    i2c_master_dev_handle_t  dev;
+    uint8_t                  i2c_addr;
+} fm24cl64_t;
+
+esp_err_t fm24cl64_init(const fm24cl64_config_t *cfg, fm24cl64_t *out);
+esp_err_t fm24cl64_read (fm24cl64_t *dev, uint16_t addr, void *data, size_t len);
+esp_err_t fm24cl64_write(fm24cl64_t *dev, uint16_t addr, const void *data, size_t len);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fm24cl64.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fram_wl.c ---
+#include "fram_wl.h"
+#include <string.h>
+#include <stdlib.h>       // for malloc/free used below
+#include "esp_check.h"    // for ESP_RETURN_ON_ERROR()
+
+static uint32_t crc32_le(const void *data, size_t len) {
+    uint32_t crc = 0xFFFFFFFFu;
+    const uint8_t *p = (const uint8_t *)data;
+    while (len--) {
+        crc ^= *p++;
+        for (int i = 0; i < 8; i++)
+            crc = (crc >> 1) ^ (0xEDB88320u & (-(int)(crc & 1)));
+    }
+    return ~crc;
+}
+
+static inline uint16_t slot_addr(const fram_wl_t *wl, uint16_t idx) {
+    return wl->start + idx * wl->slot_size;
+}
+
+esp_err_t fram_wl_mount(fram_wl_t *wl, fm24cl64_t *fram,
+                        uint16_t start, uint16_t area_size, uint16_t payload_size)
+{
+    if (!wl || !fram) return ESP_ERR_INVALID_ARG;
+    memset(wl, 0, sizeof(*wl));
+    wl->fram = fram;
+    wl->start = start;
+    wl->area_size = area_size;
+    wl->payload_size = payload_size;
+
+    // Overhead: mark(1) + seq(4) + crc(4)
+    wl->slot_size  = (uint16_t)(1 + 4 + payload_size + 4);
+    if (wl->slot_size == 0 || area_size < wl->slot_size) return ESP_ERR_INVALID_SIZE;
+    wl->slot_count = (uint16_t)(area_size / wl->slot_size);
+    if (wl->slot_count == 0) return ESP_ERR_INVALID_SIZE;
+
+    wl->cur_idx = 0xFFFF;
+    wl->cur_seq = 0;
+
+    // Scan all slots to find the highest valid seq
+    uint8_t hdr[1 + 4]; // mark + seq
+    uint8_t buf[256];   // payload chunk (we’ll read whole payload in pieces if large)
+    for (uint16_t i = 0; i < wl->slot_count; i++) {
+        uint16_t a = slot_addr(wl, i);
+        esp_err_t err = fm24cl64_read(wl->fram, a, hdr, sizeof(hdr));
+        if (err != ESP_OK) return err;
+        if (hdr[0] != 0xFE) continue; // not committed
+
+        uint32_t seq = (uint32_t)hdr[1] | ((uint32_t)hdr[2] << 8)
+                     | ((uint32_t)hdr[3] << 16) | ((uint32_t)hdr[4] << 24);
+
+        // Read CRC
+        uint32_t crc_stored = 0;
+        err = fm24cl64_read(wl->fram, a + 1 + 4 + wl->payload_size, &crc_stored, sizeof(crc_stored));
+        if (err != ESP_OK) return err;
+
+        // Compute CRC over seq + payload
+        uint32_t crc = 0xFFFFFFFFu; // incremental
+        crc = ~crc;
+        // build a tiny tmp for seq in LE
+        uint8_t seq_le[4] = { hdr[1], hdr[2], hdr[3], hdr[4] };
+        crc = ~crc;
+        crc = crc32_le(seq_le, 4);
+
+        size_t rem = wl->payload_size;
+        uint16_t off = 0;
+        uint32_t crc_running = 0xFFFFFFFFu;
+        // include seq first
+        crc_running = 0xFFFFFFFFu;
+        crc_running = ~crc_running;
+        crc_running = crc32_le(seq_le, 4);
+
+        while (rem) {
+            size_t n = rem > sizeof(buf) ? sizeof(buf) : rem;
+            err = fm24cl64_read(wl->fram, a + 1 + 4 + off, buf, n);
+            if (err != ESP_OK) return err;
+            crc_running = crc32_le(buf, n) ^ (crc_running ? 0 : 0); // chained via reinit each call
+            // Since crc32_le returns a full CRC (reinit each call), do simple accumulate:
+            // easier: recompute over seq+payload in one buffer if payload <= 256
+            // but keep it simple: we’ll rebuild a small linear method below.
+            // To avoid confusion, recompute plainly after loop:
+            rem = 0; // fallback compute below
+        }
+
+        // Plain recompute over seq+payload (single pass)
+        uint8_t *tmp = (uint8_t *)malloc(4 + wl->payload_size);
+        if (!tmp) return ESP_ERR_NO_MEM;
+        memcpy(tmp, seq_le, 4);
+        err = fm24cl64_read(wl->fram, a + 1 + 4, tmp + 4, wl->payload_size);
+        if (err != ESP_OK) { free(tmp); return err; }
+        uint32_t crc_calc = crc32_le(tmp, 4 + wl->payload_size);
+        free(tmp);
+
+        if (crc_calc != crc_stored) continue; // corrupted
+
+        if (wl->cur_idx == 0xFFFF || (int32_t)(seq - wl->cur_seq) > 0) {
+            wl->cur_idx = i;
+            wl->cur_seq = seq;
+        }
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t fram_wl_format(fram_wl_t *wl) {
+    if (!wl || !wl->fram) return ESP_ERR_INVALID_ARG;
+
+    // Just set all mark bytes to 0xFF (free)
+    for (uint16_t i = 0; i < wl->slot_count; i++) {
+        uint8_t ff = 0xFF;
+        esp_err_t err = fm24cl64_write(wl->fram, slot_addr(wl, i), &ff, 1);
+        if (err != ESP_OK) return err;
+    }
+    wl->cur_idx = 0xFFFF;
+    wl->cur_seq = 0;
+    return ESP_OK;
+}
+
+esp_err_t fram_wl_get_latest(fram_wl_t *wl, void *payload_out, bool *has) {
+    if (!wl || !payload_out) return ESP_ERR_INVALID_ARG;
+    if (has) *has = false;
+    if (wl->cur_idx == 0xFFFF) return ESP_OK;
+
+    uint16_t a = slot_addr(wl, wl->cur_idx);
+    // payload starts at +1+4
+    esp_err_t err = fm24cl64_read(wl->fram, a + 1 + 4, payload_out, wl->payload_size);
+    if (err != ESP_OK) return err;
+    if (has) *has = true;
+    return ESP_OK;
+}
+
+esp_err_t fram_wl_put(fram_wl_t *wl, const void *payload_in) {
+    if (!wl || !payload_in) return ESP_ERR_INVALID_ARG;
+
+    uint16_t next_idx = (wl->cur_idx == 0xFFFF) ? 0 : (uint16_t)((wl->cur_idx + 1) % wl->slot_count);
+    uint16_t a = slot_addr(wl, next_idx);
+    uint32_t seq = wl->cur_seq + 1;
+
+    // Write seq + payload + CRC first (mark remains 0xFF)
+    uint8_t seq_le[4] = { (uint8_t)(seq & 0xFF), (uint8_t)((seq >> 8) & 0xFF),
+                          (uint8_t)((seq >> 16) & 0xFF), (uint8_t)((seq >> 24) & 0xFF) };
+    // payload region
+    ESP_RETURN_ON_ERROR(fm24cl64_write(wl->fram, a + 1 + 0, seq_le, 4), "fram_wl", "seq write failed");
+    ESP_RETURN_ON_ERROR(fm24cl64_write(wl->fram, a + 1 + 4, payload_in, wl->payload_size), "fram_wl", "payload write failed");
+
+    // compute and store CRC over [seq + payload]
+    uint8_t *tmp = (uint8_t *)malloc(4 + wl->payload_size);
+    if (!tmp) return ESP_ERR_NO_MEM;
+    memcpy(tmp, seq_le, 4);
+    memcpy(tmp + 4, payload_in, wl->payload_size);
+    uint32_t crc = crc32_le(tmp, 4 + wl->payload_size);
+    free(tmp);
+
+    ESP_RETURN_ON_ERROR(fm24cl64_write(wl->fram, a + 1 + 4 + wl->payload_size, &crc, 4), "fram_wl", "crc write failed");
+
+    // Finally set mark to 0xFE (commit)
+    uint8_t mark = 0xFE;
+    ESP_RETURN_ON_ERROR(fm24cl64_write(wl->fram, a + 0, &mark, 1), "fram_wl", "mark write failed");
+
+    wl->cur_idx = next_idx;
+    wl->cur_seq = seq;
+    return ESP_OK;
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fram_wl.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fram_wl.h ---
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+#include "esp_err.h"
+#include "fm24cl64.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* A circular array of slots, each:
+ * [ 1 byte mark ][ 4 bytes seq ][ payload ... ][ 4 bytes CRC32 ]
+ * - mark = 0xFF => free; 0xFE => valid (commit byte written last)
+ * - seq increments on each save; the highest valid seq is the latest
+ * - CRC32 covers [seq + payload]
+ */
+
+typedef struct {
+    fm24cl64_t  *fram;
+    uint16_t     start;       // FRAM offset of WL area
+    uint16_t     area_size;   // size of WL area (bytes)
+    uint16_t     slot_size;   // 1 + 4 + payload + 4
+    uint16_t     payload_size;
+    uint16_t     slot_count;
+    uint16_t     cur_idx;     // index of latest valid slot or 0xFFFF if none
+    uint32_t     cur_seq;
+} fram_wl_t;
+
+esp_err_t fram_wl_mount(fram_wl_t *wl, fm24cl64_t *fram,
+                        uint16_t start, uint16_t area_size, uint16_t payload_size);
+
+esp_err_t fram_wl_format(fram_wl_t *wl);
+
+// Load latest payload; returns ESP_OK and sets *has=true if found
+esp_err_t fram_wl_get_latest(fram_wl_t *wl, void *payload_out, bool *has);
+
+// Save a new payload version (advances the ring)
+esp_err_t fram_wl_put(fram_wl_t *wl, const void *payload_in);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\fram_wl.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\idf_component.yml ---
+# /main/idf_component.yml
+## Pull maintained components from Espressif's registry.
+dependencies:
+  idf: ">=5.5"
+  espressif/esp_lcd_st7796: "^1.3.5"
+  lvgl/lvgl: "^9" # LVGL v9.x
+  espressif/led_strip: "^3.0.0"
+  #  espressif/esp_lvgl_port: "^2.6.0"
+  espressif/esp_lcd_touch_ft5x06: "^1.0.7"
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\idf_component.yml ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\led_addr.c ---
+#include "led_addr.h"
+#include "led_strip.h"
+#include "led_strip_rmt.h"
+#include "esp_log.h"
+
+static const char *TAG = "led_addr";
+
+static led_strip_handle_t s_strip = NULL;
+static uint16_t s_count = 0;
+
+esp_err_t led_addr_init(gpio_num_t gpio, uint16_t led_count, bool use_dma)
+{
+    if (s_strip) return ESP_OK;
+
+    led_strip_config_t strip_cfg = {
+        .strip_gpio_num   = (int)gpio,
+        .max_leds         = led_count,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,   // WS2812/FZ2812 are GRB on the wire
+        .led_model        = LED_MODEL_WS2812,
+        .flags.invert_out = false,
+    };
+
+    led_strip_rmt_config_t rmt_cfg = {
+        .clk_src          = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz    = 10 * 1000 * 1000,       // 10 MHz base = standard WS2812 timing
+        .mem_block_symbols = 0,                      // 0 = auto (enough for short strips)
+        .flags.with_dma   = use_dma,                 // false is fine for 22 LEDs
+    };
+
+    esp_err_t err = led_strip_new_rmt_device(&strip_cfg, &rmt_cfg, &s_strip);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "led_strip_new_rmt_device failed: %d", err);
+        return err;
+    }
+
+    s_count = led_count;
+    ESP_ERROR_CHECK(led_strip_clear(s_strip));      // all off
+    ESP_LOGI(TAG, "Initialized strip on GPIO %d, %u LEDs", (int)gpio, (unsigned)led_count);
+    return ESP_OK;
+}
+
+esp_err_t led_addr_set_rgb(uint16_t index, uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_strip) return ESP_ERR_INVALID_STATE;
+    if (index >= s_count) return ESP_ERR_INVALID_ARG;
+    return led_strip_set_pixel(s_strip, index, r, g, b);
+}
+
+esp_err_t led_addr_show(void)
+{
+    if (!s_strip) return ESP_ERR_INVALID_STATE;
+    return led_strip_refresh(s_strip);
+}
+
+esp_err_t led_addr_fill(uint8_t r, uint8_t g, uint8_t b)
+{
+    if (!s_strip) return ESP_ERR_INVALID_STATE;
+    for (uint16_t i = 0; i < s_count; i++) {
+        esp_err_t err = led_strip_set_pixel(s_strip, i, r, g, b);
+        if (err != ESP_OK) return err;
+    }
+    return led_addr_show();
+}
+
+esp_err_t led_addr_clear(void)
+{
+    if (!s_strip) return ESP_ERR_INVALID_STATE;
+    return led_strip_clear(s_strip);
+}
+
+void led_addr_selftest(void)
+{
+    if (!s_strip) return;
+    // R/G/B repeating along the strip
+    for (uint16_t i = 0; i < s_count; i++) {
+        uint8_t r = (i % 3) == 0 ? 255 : 0;
+        uint8_t g = (i % 3) == 1 ? 255 : 0;
+        uint8_t b = (i % 3) == 2 ? 255 : 0;
+        led_strip_set_pixel(s_strip, i, r, g, b);
+    }
+    led_strip_refresh(s_strip);
+}
+
+void led_addr_deinit(void)
+{
+    if (s_strip) {
+        led_strip_clear(s_strip);
+        led_strip_del(s_strip);
+        s_strip = NULL;
+        s_count = 0;
+        ESP_LOGI(TAG, "Strip deinitialized");
+    }
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\led_addr.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\led_addr.h ---
+#pragma once
+#include "esp_err.h"
+#include "driver/gpio.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Initialize a WS2812/FZ2812-compatible strip.
+ * @param gpio       Data pin (e.g., GPIO_NUM_36)
+ * @param led_count  Number of LEDs on the strip
+ * @param use_dma    true to enable RMT DMA (usually unnecessary for short strips)
+ */
+esp_err_t led_addr_init(gpio_num_t gpio, uint16_t led_count, bool use_dma);
+
+/** Set one LED to RGB (0..255). Call led_addr_show() after batching changes. */
+esp_err_t led_addr_set_rgb(uint16_t index, uint8_t r, uint8_t g, uint8_t b);
+
+/** Fill entire strip to one color and refresh. */
+esp_err_t led_addr_fill(uint8_t r, uint8_t g, uint8_t b);
+
+/** Push buffered pixel data to the strip. */
+esp_err_t led_addr_show(void);
+
+/** Clear (turn off) all LEDs and refresh. */
+esp_err_t led_addr_clear(void);
+
+/** Simple sanity test pattern (R/G/B repeating). */
+void led_addr_selftest(void);
+
+/** Free resources. */
+void led_addr_deinit(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\led_addr.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\main.c ---
+// /main/main.c — Minimal LVGL v9 example on ESP32-S3 + ST7796 (SPI) without PSRAM
+// Board: ESP32S3-DEVKIT-C-N8
+// Panel: ST7796 480x320 (landscape), SPI
+// Touch: (optional) FT6336U via I2C — NOT enabled in this minimal example
+//
+// This file replaces the raw color-bar demo with a clean LVGL setup that has
+// proven-safe DMA usage and no PSRAM dependency. It reuses the same pins you had.
+//
+// Toolchain: ESP-IDF v5.3+ (tested on v5.5) with managed components:
+//   lvgl/lvgl ^9, espressif/esp_lcd_st7796, espressif/esp_lvgl_port (not used here),
+//   but we talk to esp_lcd directly for explicit control.
+//
+// Build:
+//   idf.py set-target esp32s3
+//   idf.py build flash monitor
+//
+// If you previously saw "garbage" or core panics, the usual culprits are:
+//   - lvgl buffers not in DMA-capable internal RAM
+//   - flush callback not waiting for the SPI DMA to finish before reusing buffers
+//   - wrong MADCTL (swap_xy/mirror) causing out-of-bounds writes
+//   - SPI clock too high on long wires; start at 20 MHz or lower
+//
+// This example handles those points explicitly.
+#undef LOG_LOCAL_LEVEL
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
+
+#include <inttypes.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_timer.h"
+
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
+#include "driver/i2c_master.h"
+
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_st7796.h"
+
+#include "lvgl.h"
+
+#include "touch_ft6336.h"
+#include "touch_debug.h"
+
+#include "fm24cl64.h"
+#include "fram_wl.h"
+
+#include "ui_theme.h"
+#include "ui_pages.h"
+
+#include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
+#include "led_addr.h"
+
+#include "prefs_store.h"
+
+// Pick a non-overlapping FRAM window for preferences
+#define PREFS_AREA_START   0x0400   // adjust if you already use 0x0000.. elsewhere
+#define PREFS_AREA_SIZE    1024     // a few slots is enough
+#define PREFS_VERSION      1        // bump if you change boot_prefs_t layout
+
+typedef struct {
+    uint32_t boot_count;
+} boot_prefs_t;
+
+// -------------------- Pins (from your working bring-up) --------------------
+#define PIN_LCD_RST   15
+#define PIN_LCD_CS    16
+#define PIN_LCD_DC    10
+#define PIN_SPI_MOSI  11
+#define PIN_SPI_SCK   12
+#define PIN_SPI_MISO  13
+#define PIN_LCD_BL    14
+
+// FT6336U touch
+#define PIN_I2C_SDA   1
+#define PIN_I2C_SCL   2
+#define PIN_TOUCH_INT 40
+#define PIN_TOUCH_RST 21
+
+static i2c_master_bus_handle_t g_i2c_bus = NULL;
+
+// -------------------- Panel / SPI timing --------------------
+#define LCD_HOST            SPI2_HOST
+#define LCD_SPI_CLOCK_HZ    (20 * 1000 * 1000)   // start conservative; raise after it's stable
+
+// Pick ONE:
+// #define ORIENTATION_PORTRAIT
+#define ORIENTATION_LANDSCAPE
+
+#if defined(ORIENTATION_PORTRAIT)
+  // Panel: native portrait (no swap)
+  const bool swap_xy  = false;
+  const bool mirror_x = true;   // flip if text is mirrored; try false if needed
+  const bool mirror_y = false;
+
+  // LVGL geometry = 320x480, no rotation
+  #undef  LCD_H_RES
+  #undef  LCD_V_RES
+  #define LCD_H_RES 320
+  #define LCD_V_RES 480
+  const lv_display_rotation_t lv_rot = LV_DISPLAY_ROTATION_0; // or _180 if upside down
+
+#elif defined(ORIENTATION_LANDSCAPE)
+  // Panel: landscape via MV bit (swap XY)
+  const bool swap_xy  = true;
+  const bool mirror_x = false;   // adjust these two to get text upright
+  const bool mirror_y = false;
+
+  // LVGL geometry = 480x320, no rotation
+  #undef  LCD_H_RES
+  #undef  LCD_V_RES
+  #define LCD_H_RES 480
+  #define LCD_V_RES 320
+  const lv_display_rotation_t lv_rot = LV_DISPLAY_ROTATION_0; // or _180 if needed
+#endif
+
+
+static const char *TAG = "lvgl_st7796_min";
+
+static fm24cl64_t g_fram;                         // FRAM device (optional)
+
+#define LVGL_TASK_STACK   (8 * 1024)
+#define LVGL_TASK_PRIO    2
+#define LVGL_TASK_CORE    1   // run LVGL on CPU1
+
+// one global theme (file-scope)
+static ui_theme_t g_theme;
+
+typedef struct {
+    bool status;
+    int status_gpio;
+} AppCtx;
+
+static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
+
+static esp_err_t i2c_bus_shared_init(void)
+{
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port   = 0,                    /* I2C_NUM_0 */
+        .sda_io_num = PIN_I2C_SDA,
+        .scl_io_num = PIN_I2C_SCL,
+        .glitch_ignore_cnt = 7,
+        .intr_priority     = 0,
+        .trans_queue_depth = 0,
+        .flags = {
+            .enable_internal_pullup = 0,   /* you have external pull-ups */
+        }
+    };
+    return i2c_new_master_bus(&bus_cfg, &g_i2c_bus);
+}
+
+static void demo_prefs_boot_counter(fm24cl64_t *fram)
+{
+    prefs_store_t ps;
+    ESP_ERROR_CHECK(prefs_store_init(&ps,
+                                     fram,
+                                     /*start*/ PREFS_AREA_START,
+                                     /*area*/  PREFS_AREA_SIZE,
+                                     /*ver*/   PREFS_VERSION,
+                                     /*size*/  sizeof(boot_prefs_t)));
+
+    boot_prefs_t prefs = {0};
+    bool has = false;
+    ESP_ERROR_CHECK(prefs_store_load(&ps, &prefs, &has));
+
+    if(!has) {
+        // first time or version mismatch → start from zero
+        prefs.boot_count = 0;
+    }
+
+    // Report current count
+    ESP_LOGI("prefs", "Boot count (before increment): %u", (unsigned)prefs.boot_count);
+
+    // Increment and save
+    prefs.boot_count++;
+    ESP_ERROR_CHECK(prefs_store_save(&ps, &prefs));
+
+    ESP_LOGI("prefs", "Boot count saved as: %u", (unsigned)prefs.boot_count);
+}
+
+static void act_led(lv_event_t *e) {
+    if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;   // for toggles
+    lv_obj_t *btn = lv_event_get_target(e);
+    bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
+
+    if (on) { led_addr_fill(0,0,0); }
+    else    { led_addr_fill(255,255,255); }
+    led_addr_show();
+}
+
+static void act_next(lv_event_t *e) {
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    ESP_LOGI("ui", "Next pressed");
+    (void)e; 
+}
+
+static void lvgl_task(void *arg)
+{
+    const TickType_t period = pdMS_TO_TICKS(10);  // 100 Hz handler, plenty for LVGL
+    TickType_t last = xTaskGetTickCount();
+    while (true) {
+        lv_timer_handler();
+        vTaskDelayUntil(&last, period);
+    }
+}
+
+// -------------------- Backlight simple ON --------------------
+static void backlight_on(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << PIN_LCD_BL,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = 0,
+        .pull_down_en = 0,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&cfg);
+    gpio_set_level(PIN_LCD_BL, 1);
+}
+
+// -------------------- LVGL tick based on esp_timer --------------------
+static uint32_t lv_tick_cb(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL); // ms
+}
+
+// -------------------- LCD / LVGL glue --------------------
+typedef struct {
+    esp_lcd_panel_handle_t panel;
+    esp_lcd_panel_io_handle_t io;
+    SemaphoreHandle_t color_done_sem;
+    lv_display_t *disp;
+} lcd_ctx_t;
+
+static lcd_ctx_t s_lcd = {0};
+
+static bool on_color_trans_done_cb(esp_lcd_panel_io_handle_t io,
+                                   esp_lcd_panel_io_event_data_t *edata,
+                                   void *user_ctx)
+{
+    BaseType_t hp_task_woken = pdFALSE;
+    SemaphoreHandle_t sem = (SemaphoreHandle_t)user_ctx;
+    xSemaphoreGiveFromISR(sem, &hp_task_woken);
+    return hp_task_woken == pdTRUE;
+}
+
+// Use lv_draw_sw_rgb565_swap() instead
+static inline void swap16_bytes_inplace(uint8_t *buf, size_t len_bytes)
+{
+    // swap bytes within each 16-bit halfword efficiently
+    uint32_t *p32 = (uint32_t *)buf;
+    size_t n32 = len_bytes >> 2;
+
+    for (size_t i = 0; i < n32; i++) {
+        uint32_t v = p32[i];
+        p32[i] = ((v & 0x00FF00FFu) << 8) | ((v & 0xFF00FF00u) >> 8);
+    }
+    if (len_bytes & 2) { // leftover one 16-bit pixel
+        uint8_t *p = buf + (n32 << 2);
+        uint8_t t = p[0]; p[0] = p[1]; p[1] = t;
+    }
+}
+
+static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    // esp_lcd expects end coords to be EXCLUSIVE
+    int x1 = area->x1;
+    int y1 = area->y1;
+    int x2 = area->x2 + 1;
+    int y2 = area->y2 + 1;
+
+    ESP_LOGD(TAG, "flush (%d,%d)-(%d,%d)", x1, y1, x2-1, y2-1);
+
+    lv_draw_sw_rgb565_swap(px_map, (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1));
+
+    // Start DMA transfer of this area
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_lcd.panel, x1, y1, x2, y2, px_map));
+
+    // Wait for the DMA to finish before we tell LVGL it can reuse the buffer
+    xSemaphoreTake(s_lcd.color_done_sem, portMAX_DELAY);
+    lv_display_flush_ready(disp);
+}
+
+// -------------------- Minimal LVGL UI: RGB bars + white box --------------------
+static void ui_create(void)
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0); 
+
+    // Three horizontal bars
+    int third = LCD_V_RES / 3;
+
+    lv_obj_t *bar_r = lv_obj_create(scr);
+    lv_obj_remove_style_all(bar_r);
+    lv_obj_set_size(bar_r, LCD_H_RES, third);
+    lv_obj_set_style_bg_color(bar_r, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(bar_r, LV_OPA_COVER, 0);
+    lv_obj_set_pos(bar_r, 0, 0);
+
+    lv_obj_t *bar_g = lv_obj_create(scr);
+    lv_obj_remove_style_all(bar_g);
+    lv_obj_set_size(bar_g, LCD_H_RES, third);
+    lv_obj_set_style_bg_color(bar_g, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_bg_opa(bar_g, LV_OPA_COVER, 0);
+    lv_obj_set_pos(bar_g, 0, third);
+
+    lv_obj_t *bar_b = lv_obj_create(scr);
+    lv_obj_remove_style_all(bar_b);
+    lv_obj_set_size(bar_b, LCD_H_RES, LCD_V_RES - 2*third);
+    lv_obj_set_style_bg_color(bar_b, lv_palette_main(LV_PALETTE_BLUE), 0);
+    lv_obj_set_style_bg_opa(bar_b, LV_OPA_COVER, 0);
+    lv_obj_set_pos(bar_b, 0, 2*third);
+
+    // Centered white rectangle (same dimensions as your working demo)
+    int bw = LCD_H_RES / 2;
+    int bh = LCD_V_RES / 2;
+    lv_obj_t *box = lv_obj_create(scr);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, bw, bh);
+    lv_obj_set_style_bg_color(box, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_center(box);
+
+    // Label to prove text rendering is sane
+    lv_obj_t *lbl = lv_label_create(scr);
+    lv_label_set_text(lbl, "LVGL OK");
+    lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
+    lv_obj_set_style_text_opa(lbl, LV_OPA_COVER, 0);
+    lv_obj_center(lbl);
+
+    // Build buttons from a descriptor table
+    static const ui_widget_desc_t HOME_WIDGETS[] = {
+        // LED button (bottom-left), requires POWER
+        {
+            .type = UIW_BUTTON,
+            .align = LV_ALIGN_BOTTOM_LEFT, .x_ofs = 14, .y_ofs = -12,
+            .w = 96, .h = 48,
+            .text = "LED",
+            .variants = UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
+            .toggle = true,
+            .on_event = act_led, .user_data = NULL,
+            .require_mask = UIF_POWER, .block_mask = 0,
+            .groups_mask = UGRP_DEFAULT
+        },
+        // Next button (bottom-right), requires POWER AND ADVANCED
+        {
+            .type = UIW_BUTTON,
+            .align = LV_ALIGN_BOTTOM_RIGHT, .x_ofs = -14, .y_ofs = -12,
+            .w = 96, .h = 48,
+            .text = "Next",
+            .variants = UI_BTN_VARIANT_OUTLINE,
+            .toggle = false,
+            .on_event = act_next, .user_data = NULL,
+            .require_mask = (UIF_POWER | UIF_ADVANCED), .block_mask = 0,
+            .groups_mask = UGRP_DEFAULT
+        },
+    };
+
+    static const ui_page_desc_t HOME_PAGE = {
+        .name = "Home",
+        .widgets = HOME_WIDGETS,
+        .widget_count = sizeof(HOME_WIDGETS) / sizeof(HOME_WIDGETS[0]),
+    };
+
+    ui_page_handle_t *home = ui_page_build(scr, &g_theme, &HOME_PAGE);
+    // Compose flags from current app state
+    g_ui_flags = UIF_POWER;                 // enable “LED” for testing
+    g_ui_flags |= UIF_ADVANCED;          // enable “Next” too, if you want
+    ui_page_set_flags(home, g_ui_flags);
+    ui_page_apply(home);
+
+}
+
+// -------------------- app_main --------------------
+void app_main(void)
+{
+    esp_log_level_set("*", ESP_LOG_DEBUG);   // so ESP_LOGD is visible
+
+    ESP_LOGI(TAG, "Init (ESP-IDF + LVGL v9), ST7796 %dx%d, SPI=%u Hz", LCD_H_RES, LCD_V_RES, LCD_SPI_CLOCK_HZ);
+    beeper_init_disable();   // keep GPIO39 low at boot
+
+
+    // -------------------- I2C BUS (shared) --------------------
+
+    /* 1) Shared I2C bus */
+    ESP_ERROR_CHECK(i2c_bus_shared_init());
+
+    /* 2) FRAM on the same bus */
+    fm24cl64_t fram = {0};
+    ESP_ERROR_CHECK(fm24cl64_init_on_bus(g_i2c_bus, 0x50, &fram));   /* 0x50..0x57 depending on A2/A1/A0 */
+
+    /* 3) Touch on the same bus */
+    esp_lcd_touch_handle_t tp = NULL;
+    touch_ft6336_cfg_t tcfg = {
+        .i2c_sda_io = PIN_I2C_SDA,        /* not used by init_on_bus, but fine to keep */
+        .i2c_scl_io = PIN_I2C_SCL,
+        .int_io     = 40,                  /* your INT pin */
+        .rst_io     = -1,                  /* no reset line wired? use -1 */
+        .x_max      = LCD_H_RES,           /* e.g. 480 */
+        .y_max      = LCD_V_RES,           /* e.g. 320 */
+        /* Adjust these three if axes look swapped or mirrored */
+        .swap_xy    = false,               /* true if FT6336 is mounted rotated */
+        .mirror_x   = true,                /* match your LCD MADCTL orientation */
+        .mirror_y   = false,
+        .i2c_clk_hz = 400000,              /* bus speed already set by bus init */
+    };
+    ESP_ERROR_CHECK(touch_ft6336_init_on_bus(g_i2c_bus, &tcfg, &tp));
+
+    lv_indev_t *indev = touch_lvgl_register(tp, tcfg.x_max, tcfg.y_max);
+    
+    // FRAM is ready at this point
+    demo_prefs_boot_counter(&g_fram);
+
+    // 1) SPI bus
+    spi_bus_config_t buscfg = {
+        .sclk_io_num = PIN_SPI_SCK,
+        .mosi_io_num = PIN_SPI_MOSI,
+        .miso_io_num = PIN_SPI_MISO,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = LCD_H_RES * 40 * 2 + 16,  // 40 lines double-buffered; safe margin
+        .flags = SPICOMMON_BUSFLAG_MASTER
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
+    // 2) Panel IO (command/data over SPI) with a DMA-done ISR -> semaphore
+    s_lcd.color_done_sem = xSemaphoreCreateBinary();
+    esp_lcd_panel_io_spi_config_t io_cfg = {
+        .dc_gpio_num = PIN_LCD_DC,
+        .cs_gpio_num = PIN_LCD_CS,
+        .pclk_hz = LCD_SPI_CLOCK_HZ,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .spi_mode = 0,
+        .trans_queue_depth = 10,
+        .on_color_trans_done = on_color_trans_done_cb,
+        .user_ctx = s_lcd.color_done_sem,
+        .flags = {
+            .dc_low_on_data = false,     // ST77xx use D/C high for data
+            .octal_mode = 0,
+            // .lsb_first = 0,       // (default) keep MSB first on SPI
+        }
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(LCD_HOST, &io_cfg, &s_lcd.io));
+
+    // 3) Vendor panel instance
+    esp_lcd_panel_dev_config_t panel_cfg = {
+        .reset_gpio_num = PIN_LCD_RST,
+        .rgb_ele_order  = LCD_RGB_ELEMENT_ORDER_BGR,  // ST7796 is BGR by default
+        .data_endian    = LCD_RGB_DATA_ENDIAN_BIG,        // <— FIX: high byte first on the bus
+        .bits_per_pixel = 16,
+    };
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7796(s_lcd.io, &panel_cfg, &s_lcd.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_reset(s_lcd.panel));
+    ESP_ERROR_CHECK(esp_lcd_panel_init(s_lcd.panel));
+
+    ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_lcd.panel, swap_xy));
+    ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_lcd.panel, mirror_x, mirror_y));
+    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_lcd.panel, true));
+
+
+    // 4) LVGL init + display driver
+    lv_init();
+    lv_tick_set_cb(lv_tick_cb);
+
+    // Create LVGL display
+    lv_display_t *disp = lv_display_create(LCD_H_RES, LCD_V_RES);
+    lv_display_set_default(disp);
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    // Make LVGL produce RGB565 in big-endian byte order for the panel
+    lv_display_set_rotation(disp, lv_rot);  // 0 or 180 ONLY
+
+    // Allocate 2 DMA-capable draw buffers in internal RAM (no PSRAM)
+    const uint32_t buf_lines = 40;
+    size_t bpp = lv_color_format_get_size(LV_COLOR_FORMAT_RGB565);
+    size_t buf_size_bytes = (size_t)LCD_H_RES * buf_lines * bpp;  // 480*lines in landscape
+    void *buf1 = heap_caps_malloc(buf_size_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    void *buf2 = heap_caps_malloc(buf_size_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    lv_display_set_buffers(disp, buf1, buf2, buf_size_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(disp, lvgl_flush_cb);
+
+    lv_indev_set_display(indev, lv_display_get_default());   // <-- add this line
+    touch_debug_overlay_create(indev, true, true);           // your red-dot/coords overlay
+    // touch_debug_start(tp, "touch");                          // start the logger with the handle
+
+    // 5) Simple UI
+    /* Optional: clear to black once (native geometry) */
+    static uint16_t black[LCD_H_RES * 20] = {0};
+    for (int y = 0; y < LCD_V_RES; y += 20) {
+        esp_lcd_panel_draw_bitmap(s_lcd.panel, 0, y, LCD_H_RES, y + 20, black);
+    }
+
+
+    /* Now enable BL once the frame memory isn’t white */
+    backlight_on();
+
+    ESP_ERROR_CHECK(led_addr_init(GPIO_NUM_36, 22, false));
+    // led_addr_selftest();                 // quick sanity check
+    // Example: set LED 0 to orange, LED 1 to cyan, then show:
+    // ESP_ERROR_CHECK(led_addr_set_rgb(0, 255, 128, 0));
+    // ESP_ERROR_CHECK(led_addr_set_rgb(1, 0, 255, 255));
+    // ESP_ERROR_CHECK(led_addr_show());
+
+    ESP_LOGI(TAG, "UI create");
+    ui_theme_init(&g_theme);
+    ui_create();
+
+    // Start LVGL on CPU1 and free CPU0 for idle (and Wi-Fi/ISR work)
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", LVGL_TASK_STACK,
+                            NULL, LVGL_TASK_PRIO, NULL, LVGL_TASK_CORE);
+
+    // app_main no longer needs to sit in a loop; let CPU0 idle feed the WDT
+    vTaskDelete(NULL);
+
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\main.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\prefs_store.c ---
+#include "prefs_store.h"
+#include <string.h>
+#include "esp_check.h"    // for ESP_RETURN_ON_ERROR()
+
+esp_err_t prefs_store_init(prefs_store_t *ps,
+                           fm24cl64_t *fram,
+                           uint16_t start, uint16_t area_size,
+                           uint16_t version, uint16_t payload_size)
+{
+    if (!ps) return ESP_ERR_INVALID_ARG;
+    memset(ps, 0, sizeof(*ps));
+    ps->version = version;
+    ps->payload_size = payload_size;
+    // WL payload includes version field at the front
+    ESP_RETURN_ON_ERROR(
+        fram_wl_mount(&ps->wl, fram, start, area_size, (uint16_t)(2 + payload_size)),
+        "prefs", "wl mount failed"
+    );
+    return ESP_OK;
+}
+
+esp_err_t prefs_store_load(prefs_store_t *ps, void *payload_out, bool *has) {
+    if (!ps || !payload_out) return ESP_ERR_INVALID_ARG;
+    if (has) *has = false;
+
+    uint8_t *buf = (uint8_t *)malloc(2 + ps->payload_size);
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    bool got = false;
+    esp_err_t err = fram_wl_get_latest(&ps->wl, buf, &got);
+    if (err != ESP_OK) { free(buf); return err; }
+
+    if (got) {
+        uint16_t v = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+        if (v == ps->version) {
+            memcpy(payload_out, buf + 2, ps->payload_size);
+            if (has) *has = true;
+        }
+        // else version mismatch – caller should apply defaults
+    }
+
+    free(buf);
+    return ESP_OK;
+}
+
+esp_err_t prefs_store_save(prefs_store_t *ps, const void *payload_in) {
+    if (!ps || !payload_in) return ESP_ERR_INVALID_ARG;
+
+    uint8_t *buf = (uint8_t *)malloc(2 + ps->payload_size);
+    if (!buf) return ESP_ERR_NO_MEM;
+    buf[0] = (uint8_t)(ps->version & 0xFF);
+    buf[1] = (uint8_t)((ps->version >> 8) & 0xFF);
+    memcpy(buf + 2, payload_in, ps->payload_size);
+
+    esp_err_t err = fram_wl_put(&ps->wl, buf);
+    free(buf);
+    return err;
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\prefs_store.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\prefs_store.h ---
+#pragma once
+#include <stdbool.h>
+#include <stdint.h>
+#include "esp_err.h"
+#include "fram_wl.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Store versioned preferences as:
+ *   data := [uint16_t version][user payload bytes...]
+ * CRC32 and wear-leveling are handled by fram_wl (CRC covers version+payload).
+ */
+
+typedef struct {
+    fram_wl_t  wl;
+    uint16_t   version;
+    uint16_t   payload_size; // size of your user prefs struct
+} prefs_store_t;
+
+/* Initialize preferences area (reuses a fram_wl ring).
+ * area_size should hold several slots (>= 4 is nice).
+ */
+esp_err_t prefs_store_init(prefs_store_t *ps,
+                           fm24cl64_t *fram,
+                           uint16_t start, uint16_t area_size,
+                           uint16_t version, uint16_t payload_size);
+
+/* Load latest preferences:
+ * - returns ESP_OK and *has=true if a valid record found AND version matches.
+ * - if version mismatch or not found -> *has=false (caller should apply defaults).
+ */
+esp_err_t prefs_store_load(prefs_store_t *ps, void *payload_out, bool *has);
+
+/* Save preferences (writes version + payload into WL).
+ */
+esp_err_t prefs_store_save(prefs_store_t *ps, const void *payload_in);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\prefs_store.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_debug.c ---
+#include "touch_debug.h"
+#include "esp_log.h"
+
+static const char *TAG = "touch_dbg";
+
+static lv_indev_t *s_indev;
+static lv_obj_t   *s_dot;
+static lv_obj_t   *s_lbl;
+static bool        s_log_uart;
+static bool        s_show_label;
+static lv_point_t  s_last_pt = { .x = -1, .y = -1 };
+static lv_indev_state_t s_last_state = LV_INDEV_STATE_RELEASED;
+
+static void touch_tmr_cb(lv_timer_t *t)
+{
+    LV_UNUSED(t);
+    if(!s_indev) return;
+
+    lv_point_t p;
+    lv_indev_get_point(s_indev, &p);
+    lv_indev_state_t st = lv_indev_get_state(s_indev);
+    bool pressed = (st == LV_INDEV_STATE_PRESSED);
+
+    if(pressed) {
+        // Only move dot if coordinates changed
+        if (p.x != s_last_pt.x || p.y != s_last_pt.y) {
+            lv_coord_t dx = lv_obj_get_width(s_dot)/2, dy = lv_obj_get_height(s_dot)/2;
+            lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(s_dot, p.x - dx, p.y - dy);
+
+            if(s_show_label && s_lbl) {
+                static char buf[32];
+                lv_snprintf(buf, sizeof(buf), "(%d,%d)", (int)p.x, (int)p.y);
+                lv_label_set_text(s_lbl, buf); // triggers a small-area refresh
+            }
+        }
+    } else {
+        if (s_last_state == LV_INDEV_STATE_PRESSED) {
+            lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    // UART log only on change
+    if(s_log_uart && (pressed != (s_last_state == LV_INDEV_STATE_PRESSED) ||
+                      p.x != s_last_pt.x || p.y != s_last_pt.y)) {
+        if(pressed) ESP_LOGD(TAG, "touch: %d,%d", (int)p.x, (int)p.y);
+        else        ESP_LOGD(TAG, "touch: released");
+    }
+
+    s_last_pt = p;
+    s_last_state = st;
+}
+
+void touch_debug_overlay_create(lv_indev_t *indev, bool log_uart, bool show_label)
+{
+    s_indev = indev;
+    s_log_uart = log_uart;
+    s_show_label = show_label;
+
+    lv_obj_t *layer = lv_layer_top();
+
+    // Red dot cursor (passive)
+    s_dot = lv_obj_create(layer);
+    lv_obj_remove_style_all(s_dot);
+    lv_obj_set_size(s_dot, 12, 12);
+    lv_obj_set_style_bg_color(s_dot, lv_palette_main(LV_PALETTE_RED), 0);
+    lv_obj_set_style_bg_opa(s_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_outline_width(s_dot, 1, 0);
+    lv_obj_set_style_outline_color(s_dot, lv_color_white(), 0);
+    lv_obj_add_flag(s_dot, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);     // hidden until pressed
+    // critical lines: keep it non-interactive
+    lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Optional coordinate label (also passive)
+    if(s_show_label) {
+        s_lbl = lv_label_create(layer);
+        lv_label_set_text(s_lbl, "(---,---)");
+        lv_obj_set_style_text_color(s_lbl, lv_palette_main(LV_PALETTE_YELLOW), 0);
+        lv_obj_set_style_bg_opa(s_lbl, LV_OPA_TRANSP, 0);
+        lv_obj_set_pos(s_lbl, 2, 2);
+        lv_obj_clear_flag(s_lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_lbl, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    // Poll at ~30 Hz
+    lv_timer_create(touch_tmr_cb, 33, NULL);
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_debug.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_debug.h ---
+#pragma once
+#include "lvgl.h"
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Create a tiny red cursor overlay + optional "(x,y)" label.
+ *  - indev: your LVGL pointer indev (from touch_ft6336_init)
+ *  - log_uart: print coords to UART only when they change
+ *  - show_label: draw "(x,y)" in the top-left
+ */
+void touch_debug_overlay_create(lv_indev_t *indev, bool log_uart, bool show_label);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_debug.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.c ---
+/* ========= touch_ft6336.c : SHARED I2C + LVGL glue ========= */
+
+#include "esp_log.h"
+#include "esp_check.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_touch.h"
+#include "esp_lcd_touch_ft5x06.h"
+#include "lvgl.h"
+#include "touch_ft6336.h"
+
+static const char *TAG = "touch_ft6336";
+
+/* -------- init touch on an EXISTING I2C bus -------- */
+esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
+                                   const touch_ft6336_cfg_t *cfg,
+                                   esp_lcd_touch_handle_t *out_tp)
+{
+    ESP_RETURN_ON_FALSE(bus && cfg && out_tp, ESP_ERR_INVALID_ARG, TAG, "bad args");
+
+    /* INT needs INTERNAL pull-up (you said SDA/SCL have externals) */
+    if (cfg->int_io >= 0) {
+        gpio_config_t gi = {
+            .pin_bit_mask = 1ULL << cfg->int_io,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = 1,
+            .pull_down_en = 0,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&gi), TAG, "INT cfg failed");
+    }
+
+    /* Optional RST pulse (active low for FT6336) */
+    if (cfg->rst_io >= 0) {
+        gpio_config_t gr = {
+            .pin_bit_mask = 1ULL << cfg->rst_io,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = 0,
+            .pull_down_en = 0,
+            .intr_type = GPIO_INTR_DISABLE
+        };
+        ESP_RETURN_ON_ERROR(gpio_config(&gr), TAG, "RST cfg failed");
+        gpio_set_level(cfg->rst_io, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        gpio_set_level(cfg->rst_io, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    /* I2C panel-IO wrapper (v2 API) */
+    esp_lcd_panel_io_i2c_config_t io_cfg = {
+        .dev_addr = 0x38,                 /* FT6336 default */
+        .control_phase_bytes = 1,
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
+        .flags = { .disable_control_phase = 0 },
+    };
+    esp_lcd_panel_io_handle_t io = NULL;
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(bus, &io_cfg, &io), TAG, "panel io i2c");
+
+    /* Touch driver config */
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = cfg->x_max,
+        .y_max = cfg->y_max,
+        .rst_gpio_num = cfg->rst_io,
+        .int_gpio_num = cfg->int_io,
+        .levels = {
+            .reset = 0,       /* active low reset */
+            .interrupt = 0,   /* INT low when touched */
+        },
+        .flags = {
+            .swap_xy = cfg->swap_xy,
+            .mirror_x = cfg->mirror_x,
+            .mirror_y = cfg->mirror_y,
+        },
+    };
+
+    esp_lcd_touch_handle_t tp = NULL;
+    ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(io, &tp_cfg, &tp), TAG, "ft5x06 init");
+
+    *out_tp = tp;
+
+    ESP_LOGI(TAG, "FT6336 ready (0x%02X) %ux%u, swap_xy=%d mx=%d my=%d",
+             io_cfg.dev_addr, tp_cfg.x_max, tp_cfg.y_max,
+             (int)tp_cfg.flags.swap_xy, (int)tp_cfg.flags.mirror_x, (int)tp_cfg.flags.mirror_y);
+
+    return ESP_OK;
+}
+
+/* -------- Minimal LVGL indev registration (no wrappers needed) -------- */
+
+/* Keep a tiny static for range clamping */
+typedef struct {
+    esp_lcd_touch_handle_t tp;
+    uint16_t x_max, y_max;
+} touch_lvg_ctx_t;
+
+static touch_lvg_ctx_t s_tctx = {0};
+
+static void lv_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    if (!s_tctx.tp) { data->state = LV_INDEV_STATE_RELEASED; return; }
+
+    /* Pull a fresh sample from the IC */
+    esp_lcd_touch_read_data(s_tctx.tp);
+
+    uint16_t x = 0, y = 0;
+    uint8_t n = 0;
+    bool pressed = esp_lcd_touch_get_coordinates(s_tctx.tp, &x, &y, NULL, &n, 1);
+
+    if (pressed && n) {
+        if (x >= s_tctx.x_max) x = s_tctx.x_max - 1;
+        if (y >= s_tctx.y_max) y = s_tctx.y_max - 1;
+        data->state   = LV_INDEV_STATE_PRESSED;
+        data->point.x = (lv_coord_t)x;
+        data->point.y = (lv_coord_t)y;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+/* Call this once after touch init; returns the LVGL input device */
+lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp, uint16_t x_max, uint16_t y_max)
+{
+    s_tctx.tp = tp; s_tctx.x_max = x_max; s_tctx.y_max = y_max;
+
+    static lv_indev_drv_t drv;
+    lv_indev_drv_init(&drv);
+    drv.type    = LV_INDEV_TYPE_POINTER;
+    drv.read_cb = lv_touch_read_cb;
+    return lv_indev_drv_register(&drv);
+}
+
+/* -------- Optional: console debug task (does NOT touch LVGL) -------- */
+static void touch_dbg_task(void *arg)
+{
+    esp_lcd_touch_handle_t tp = (esp_lcd_touch_handle_t)arg;
+    uint16_t last_x = 0, last_y = 0; bool last_pressed = false;
+
+    while (1) {
+        esp_lcd_touch_read_data(tp);
+        uint16_t x = 0, y = 0; uint8_t n = 0;
+        bool pressed = esp_lcd_touch_get_coordinates(tp, &x, &y, NULL, &n, 1);
+
+        if (pressed && n) {
+            if (!last_pressed || x != last_x || y != last_y) {
+                ESP_LOGI("touch_dbg", "touch: (%u,%u)", (unsigned)x, (unsigned)y);
+            }
+            last_x = x; last_y = y;
+        } else if (last_pressed) {
+            ESP_LOGI("touch_dbg", "touch: released");
+        }
+        last_pressed = pressed && n;
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+}
+
+void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag)
+{
+    (void)tag;
+    xTaskCreatePinnedToCore(touch_dbg_task, "touch_dbg", 3 * 1024, tp, 4, NULL, 0);
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.h ---
+#pragma once
+#include "esp_err.h"
+#include "esp_lcd_touch.h"
+#include "lvgl.h"   // <-- add this so lv_indev_t is visible
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct {
+    int i2c_sda_io;
+    int i2c_scl_io;
+    int int_io;
+    int rst_io;
+    uint16_t x_max;
+    uint16_t y_max;
+    bool swap_xy;
+    bool mirror_x;
+    bool mirror_y;
+    uint32_t i2c_clk_hz;
+} touch_ft6336_cfg_t;
+
+esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
+                                   const touch_ft6336_cfg_t *cfg,
+                                   esp_lcd_touch_handle_t *out_tp);
+
+/* NEW: register the touch with LVGL, returns lv_indev_t* */
+lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp);
+
+/* Keep your old helper (polls the controller directly and logs coords) */
+void touch_debug_start(esp_lcd_touch_handle_t tp, const char *tag);
+
+/* NEW: compatibility wrapper so existing main.c builds:
+   accepts an lv_indev_t*, but just uses the internal TP handle */
+void touch_dbg_start(lv_indev_t *indev);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\touch_ft6336.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_pages.c ---
+#include "ui_pages.h"
+#include "esp_log.h"
+
+typedef struct {
+    const ui_widget_desc_t *desc;
+    lv_obj_t *obj;   // created lvgl object
+} _ui_item_t;
+
+struct ui_page_handle_t {
+    const ui_page_desc_t *page;
+    ui_theme_t *theme;
+    lv_obj_t *parent;
+    uint32_t flags_now;
+    _ui_item_t *items;
+    uint16_t count;
+};
+
+static bool _should_enable(uint32_t flags, const ui_widget_desc_t *d)
+{
+    if ((flags & d->require_mask) != d->require_mask) return false;
+    if ((flags & d->block_mask) != 0) return false;
+    return true;
+}
+
+static lv_obj_t *_make_one(lv_obj_t *parent, ui_theme_t *t, const ui_widget_desc_t *d)
+{
+    lv_obj_t *o = NULL;
+
+    switch (d->type) {
+    case UIW_BUTTON: {
+        o = ui_button_create(parent, t, d->text, d->variants, d->toggle);
+        if (d->on_event) {
+            lv_event_code_t ev = d->toggle ? LV_EVENT_VALUE_CHANGED : LV_EVENT_CLICKED;
+            lv_obj_add_event_cb(o, d->on_event, ev, d->user_data);
+        }
+        if (d->w > 0 && d->h > 0) lv_obj_set_size(o, d->w, d->h);
+        lv_obj_align(o, d->align, d->x_ofs, d->y_ofs);
+        break;
+    }
+    case UIW_LABEL: {
+        o = lv_label_create(parent);
+        if (d->text) lv_label_set_text(o, d->text);
+        if (d->w > 0 && d->h > 0) lv_obj_set_size(o, d->w, d->h);
+        lv_obj_align(o, d->align, d->x_ofs, d->y_ofs);
+        break;
+    }
+    case UIW_BOX: {
+        o = lv_obj_create(parent);
+        // minimal styling; you can layer your theme styles if desired
+        if (d->w > 0 && d->h > 0) lv_obj_set_size(o, d->w, d->h);
+        lv_obj_align(o, d->align, d->x_ofs, d->y_ofs);
+        break;
+    }
+    default:
+        break;
+    }
+
+    return o;
+}
+
+static void _apply_enabled(lv_obj_t *o, bool en)
+{
+    if (!o) return;
+
+    if (en) {
+        // Enabled: clear disabled state, leave flags alone
+        lv_obj_clear_state(o, LV_STATE_DISABLED);
+    } else {
+        // Disabled: add disabled state; LVGL will ignore input for it
+        lv_obj_add_state(o, LV_STATE_DISABLED);
+    }
+}
+
+
+ui_page_handle_t *ui_page_build(lv_obj_t *parent, ui_theme_t *theme, const ui_page_desc_t *desc)
+{
+    if (!parent || !theme || !desc || desc->widget_count == 0) return NULL;
+
+    ui_page_handle_t *ph = lv_malloc(sizeof(*ph));
+    if (!ph) return NULL;
+    ph->page = desc;
+    ph->theme = theme;
+    ph->parent = parent;
+    ph->flags_now = 0;
+    ph->count = desc->widget_count;
+    ph->items = lv_malloc(sizeof(_ui_item_t) * ph->count);
+    if (!ph->items) {
+        lv_free(ph);
+        return NULL;
+    }
+
+    for (uint16_t i = 0; i < ph->count; ++i) {
+        ph->items[i].desc = &desc->widgets[i];
+        ph->items[i].obj  = _make_one(parent, theme, ph->items[i].desc);
+    }
+    return ph;
+}
+
+void ui_page_set_flags(ui_page_handle_t *ph, uint32_t flags)
+{
+    if (!ph) return;
+    ph->flags_now = flags;
+}
+
+void ui_page_apply(ui_page_handle_t *ph)
+{
+    if (!ph) return;
+    for (uint16_t i = 0; i < ph->count; ++i) {
+        bool en = _should_enable(ph->flags_now, ph->items[i].desc);
+        _apply_enabled(ph->items[i].obj, en);
+    }
+}
+
+void ui_page_eval_one(ui_page_handle_t *ph, uint16_t index)
+{
+    if (!ph || index >= ph->count) return;
+    bool en = _should_enable(ph->flags_now, ph->items[index].desc);
+    _apply_enabled(ph->items[index].obj, en);
+}
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_pages.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_pages.h ---
+#pragma once
+#include "lvgl.h"
+#include "ui_theme.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+// App-level flags you can gate widgets on (add more as needed)
+enum {
+  UIF_POWER = 1u << 0,    // power must be ON
+  UIF_ADVANCED = 1u << 1, // advanced mode enabled
+  UIF_LOCKED = 1u << 2,   // example: safety lock active
+                          // ...
+};
+
+// Optional “groups” a widget can belong to (for bulk operations, etc.)
+enum {
+  UGRP_DEFAULT = 1u << 0,
+  UGRP_SYSTEM = 1u << 1,
+  UGRP_DEBUG = 1u << 2,
+  // ...
+};
+
+// Widget types (add more if you like)
+typedef enum {
+  UIW_BUTTON,
+  UIW_LABEL,
+  UIW_BOX,
+} ui_widget_type_t;
+
+typedef struct {
+  ui_widget_type_t type;
+
+  // Common geometry
+  lv_align_t align;
+  lv_coord_t x_ofs;
+  lv_coord_t y_ofs;
+  lv_coord_t w;
+  lv_coord_t h;
+
+  // Common text (used by buttons/labels)
+  const char *text;
+
+  // Button-only styling/behavior
+  uint32_t variants; // UI_BTN_VARIANT_* bitmask
+  bool toggle;       // checkable button
+
+  // Native LVGL callback
+  lv_event_cb_t on_event;
+  void *user_data;
+
+  // Enable/disable logic
+  uint32_t require_mask; // all of these flags must be present
+  uint32_t block_mask;   // none of these flags may be present
+
+  // Optional grouping for later bulk ops
+  uint32_t groups_mask;
+} ui_widget_desc_t;
+
+typedef struct {
+  const char *name;
+  const ui_widget_desc_t *widgets;
+  uint16_t widget_count;
+} ui_page_desc_t;
+
+// Opaque runtime handles
+typedef struct ui_page_handle_t ui_page_handle_t;
+
+// Build a page (creates widgets as lv_objs). Returns a handle you can update
+// later.
+ui_page_handle_t *ui_page_build(lv_obj_t *parent, ui_theme_t *theme,
+                                const ui_page_desc_t *desc);
+
+// Set and apply the current app flags -> enables/disables widgets accordingly
+void ui_page_set_flags(ui_page_handle_t *ph, uint32_t flags);
+void ui_page_apply(ui_page_handle_t *ph);
+
+// Quick helper if you need to re-eval a single widget externally
+void ui_page_eval_one(ui_page_handle_t *ph, uint16_t index);
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_pages.h ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.c ---
+#include "ui_theme.h"
+
+static lv_color_t press_darken(const lv_color_filter_dsc_t *dsc, lv_color_t c, lv_opa_t opa)
+{
+    LV_UNUSED(dsc);
+    return lv_color_darken(c, opa);
+}
+
+void ui_theme_init(ui_theme_t *t)
+{
+    lv_style_init(&t->btn_base);
+    lv_style_set_radius(&t->btn_base, 10);
+    lv_style_set_bg_opa(&t->btn_base, LV_OPA_COVER);
+    lv_style_set_pad_all(&t->btn_base, 10);
+    lv_style_set_border_width(&t->btn_base, 2);
+    lv_style_set_border_opa(&t->btn_base, LV_OPA_20);
+
+    // Pressed overlay (darken everything a bit)
+    lv_color_filter_dsc_init(&t->press_filter, press_darken);
+    lv_style_init(&t->btn_pressed);
+    lv_style_set_color_filter_dsc(&t->btn_pressed, &t->press_filter);
+    lv_style_set_color_filter_opa(&t->btn_pressed, LV_OPA_20);
+
+    // Primary OFF
+    lv_style_init(&t->btn_primary);
+    lv_style_set_bg_color(&t->btn_primary, lv_palette_lighten(LV_PALETTE_BLUE, 4));
+    lv_style_set_bg_grad_color(&t->btn_primary, lv_palette_main(LV_PALETTE_BLUE));
+    lv_style_set_bg_grad_dir(&t->btn_primary, LV_GRAD_DIR_VER);
+    lv_style_set_border_color(&t->btn_primary, lv_palette_darken(LV_PALETTE_BLUE, 2));
+
+    // Primary ON (checked)
+    lv_style_init(&t->btn_primary_on);
+    lv_style_set_bg_color(&t->btn_primary_on, lv_palette_main(LV_PALETTE_BLUE));
+    lv_style_set_bg_grad_color(&t->btn_primary_on, lv_palette_darken(LV_PALETTE_BLUE, 1));
+    lv_style_set_border_color(&t->btn_primary_on, lv_palette_darken(LV_PALETTE_BLUE, 3));
+
+    // Danger OFF
+    lv_style_init(&t->btn_danger);
+    lv_style_set_bg_color(&t->btn_danger, lv_palette_lighten(LV_PALETTE_RED, 4));
+    lv_style_set_bg_grad_color(&t->btn_danger, lv_palette_main(LV_PALETTE_RED));
+    lv_style_set_bg_grad_dir(&t->btn_danger, LV_GRAD_DIR_VER);
+    lv_style_set_border_color(&t->btn_danger, lv_palette_darken(LV_PALETTE_RED, 2));
+
+    // Danger ON (checked)
+    lv_style_init(&t->btn_danger_on);
+    lv_style_set_bg_color(&t->btn_danger_on, lv_palette_main(LV_PALETTE_RED));
+    lv_style_set_bg_grad_color(&t->btn_danger_on, lv_palette_darken(LV_PALETTE_RED, 1));
+    lv_style_set_border_color(&t->btn_danger_on, lv_palette_darken(LV_PALETTE_RED, 3));
+
+    // Outline OFF
+    lv_style_init(&t->btn_outline);
+    lv_style_set_bg_opa(&t->btn_outline, LV_OPA_TRANSP);
+    lv_style_set_border_color(&t->btn_outline, lv_palette_main(LV_PALETTE_GREY));
+    lv_style_set_text_color(&t->btn_outline, lv_palette_main(LV_PALETTE_GREY));
+
+    // Outline ON (checked) — fill it to show “active”
+    lv_style_init(&t->btn_outline_on);
+    lv_style_set_bg_opa(&t->btn_outline_on, LV_OPA_COVER);
+    lv_style_set_bg_color(&t->btn_outline_on, lv_palette_main(LV_PALETTE_GREY));
+    lv_style_set_text_color(&t->btn_outline_on, lv_color_white());
+
+    // Round helper
+    lv_style_init(&t->btn_round);
+    lv_style_set_radius(&t->btn_round, LV_RADIUS_CIRCLE);
+
+    // Label style
+    lv_style_init(&t->label_on_btn);
+    lv_style_set_text_color(&t->label_on_btn, lv_color_black());
+}
+
+
+lv_obj_t *ui_button_create(lv_obj_t *parent, ui_theme_t *t,
+                           const char *text, uint32_t variants, bool toggle)
+{
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_remove_style_all(btn);
+
+    // Base + pressed overlay
+    lv_obj_add_style(btn, &t->btn_base, 0);
+    lv_obj_add_style(btn, &t->btn_pressed, LV_STATE_PRESSED);
+
+    // Variants (OFF state)
+    if (variants & UI_BTN_VARIANT_PRIMARY) lv_obj_add_style(btn, &t->btn_primary, 0);
+    if (variants & UI_BTN_VARIANT_DANGER)  lv_obj_add_style(btn, &t->btn_danger,  0);
+    if (variants & UI_BTN_VARIANT_OUTLINE) lv_obj_add_style(btn, &t->btn_outline, 0);
+    if (variants & UI_BTN_VARIANT_ROUND)   lv_obj_add_style(btn, &t->btn_round,   0);
+
+    // Variants (ON state) — these are only active when LV_STATE_CHECKED is set
+    if (variants & UI_BTN_VARIANT_PRIMARY) lv_obj_add_style(btn, &t->btn_primary_on, LV_STATE_CHECKED);
+    if (variants & UI_BTN_VARIANT_DANGER)  lv_obj_add_style(btn, &t->btn_danger_on,  LV_STATE_CHECKED);
+    if (variants & UI_BTN_VARIANT_OUTLINE) lv_obj_add_style(btn, &t->btn_outline_on, LV_STATE_CHECKED);
+
+    if (toggle) lv_obj_add_flag(btn, LV_OBJ_FLAG_CHECKABLE);
+
+    // Label
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_add_style(label, &t->label_on_btn, 0);
+    lv_label_set_text(label, text ? text : "Button");
+    lv_obj_center(label);
+
+    return btn;
+}
+
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.c ---
+--- START FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.h ---
+#pragma once
+#include "lvgl.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct ui_theme_t {
+    // Base/overlays
+    lv_style_t btn_base;
+    lv_style_t btn_pressed;
+
+    // Variants (OFF state = default)
+    lv_style_t btn_primary;
+    lv_style_t btn_danger;
+    lv_style_t btn_outline;
+    lv_style_t btn_round;       // radius helper
+    lv_style_t label_on_btn;
+
+    // Variants (ON state = when LV_STATE_CHECKED is set)
+    lv_style_t btn_primary_on;
+    lv_style_t btn_danger_on;
+    lv_style_t btn_outline_on;
+
+    // Press effect
+    lv_color_filter_dsc_t press_filter;
+} ui_theme_t;
+
+
+// Variants (bitmask)
+enum {
+    UI_BTN_VARIANT_PRIMARY = 1 << 0,
+    UI_BTN_VARIANT_DANGER  = 1 << 1,
+    UI_BTN_VARIANT_OUTLINE = 1 << 2,
+    UI_BTN_VARIANT_ROUND   = 1 << 3,
+    UI_BTN_VARIANT_SMALL   = 1 << 4,  // slightly smaller paddings
+};
+
+// Init once after lv_init()
+void ui_theme_init(ui_theme_t *t);
+
+// Create a styled button (no action wiring)
+lv_obj_t *ui_button_create(lv_obj_t *parent, ui_theme_t *t,
+                           const char *text, uint32_t variants, bool toggle);
+
+#ifdef __cplusplus
+}
+#endif
+
+--- END FILE: D:\Coding_Projects\Diesel_Heater_Controller\Code\LCD_Example\main\ui_theme.h ---

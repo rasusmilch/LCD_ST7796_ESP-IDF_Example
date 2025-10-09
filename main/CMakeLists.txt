@@ -7,7 +7,7 @@ idf_component_register(
         "touch_debug.c" 
         "led_addr.c" 
         "ui_theme.c" 
-        "ui_actions.c"
+        "ui_pages.c"
         "fm24cl64.c"
         "fram_wl.c"
         "prefs_store.c"
