@@ -17,28 +17,30 @@ static void touch_tmr_cb(lv_timer_t *t)
     if(!s_indev) return;
 
     lv_point_t p;
-    lv_indev_get_point(s_indev, &p);                   // v9: returns void
-    lv_indev_state_t st = lv_indev_get_state(s_indev); // get pressed/released
-
+    lv_indev_get_point(s_indev, &p);
+    lv_indev_state_t st = lv_indev_get_state(s_indev);
     bool pressed = (st == LV_INDEV_STATE_PRESSED);
 
     if(pressed) {
-        lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
-        // center the dot on the point
-        lv_coord_t dx = lv_obj_get_width(s_dot)  / 2;
-        lv_coord_t dy = lv_obj_get_height(s_dot) / 2;
-        lv_obj_set_pos(s_dot, p.x - dx, p.y - dy);
+        // Only move dot if coordinates changed
+        if (p.x != s_last_pt.x || p.y != s_last_pt.y) {
+            lv_coord_t dx = lv_obj_get_width(s_dot)/2, dy = lv_obj_get_height(s_dot)/2;
+            lv_obj_clear_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(s_dot, p.x - dx, p.y - dy);
 
-        if(s_show_label && s_lbl) {
-            static char buf[32];
-            lv_snprintf(buf, sizeof(buf), "(%d,%d)", (int)p.x, (int)p.y);
-            lv_label_set_text(s_lbl, buf);
+            if(s_show_label && s_lbl) {
+                static char buf[32];
+                lv_snprintf(buf, sizeof(buf), "(%d,%d)", (int)p.x, (int)p.y);
+                lv_label_set_text(s_lbl, buf); // triggers a small-area refresh
+            }
         }
     } else {
-        lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+        if (s_last_state == LV_INDEV_STATE_PRESSED) {
+            lv_obj_add_flag(s_dot, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
-    // Log only on change to avoid spam
+    // UART log only on change
     if(s_log_uart && (pressed != (s_last_state == LV_INDEV_STATE_PRESSED) ||
                       p.x != s_last_pt.x || p.y != s_last_pt.y)) {
         if(pressed) ESP_LOGD(TAG, "touch: %d,%d", (int)p.x, (int)p.y);

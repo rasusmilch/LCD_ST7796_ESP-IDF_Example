@@ -36,6 +36,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
@@ -46,11 +47,26 @@
 
 #include "touch_ft6336.h"
 #include "touch_debug.h"
+
+#include "fm24cl64.h"
+#include "fram_wl.h"
+
 #include "ui_theme.h"
 #include "ui_pages.h"
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 #include "led_addr.h"
+
+#include "prefs_store.h"
+
+// Pick a non-overlapping FRAM window for preferences
+#define PREFS_AREA_START   0x0400   // adjust if you already use 0x0000.. elsewhere
+#define PREFS_AREA_SIZE    1024     // a few slots is enough
+#define PREFS_VERSION      1        // bump if you change boot_prefs_t layout
+
+typedef struct {
+    uint32_t boot_count;
+} boot_prefs_t;
 
 // -------------------- Pins (from your working bring-up) --------------------
 #define PIN_LCD_RST   15
@@ -66,6 +82,8 @@
 #define PIN_I2C_SCL   2
 #define PIN_TOUCH_INT 40
 #define PIN_TOUCH_RST 21
+
+static i2c_master_bus_handle_t g_i2c_bus = NULL;
 
 // -------------------- Panel / SPI timing --------------------
 #define LCD_HOST            SPI2_HOST
@@ -105,6 +123,8 @@
 
 static const char *TAG = "lvgl_st7796_min";
 
+static fm24cl64_t g_fram;                         // FRAM device (optional)
+
 #define LVGL_TASK_STACK   (8 * 1024)
 #define LVGL_TASK_PRIO    2
 #define LVGL_TASK_CORE    1   // run LVGL on CPU1
@@ -117,9 +137,36 @@ typedef struct {
     int status_gpio;
 } AppCtx;
 
+static AppCtx app_ctx = { .status = false, .status_gpio = 39 };
 
-static uint32_t g_ui_flags = 0;   // UIF_* mask at runtime
-static bool g_adv_enabled = false; // flip this when user enters Advanced
+static void demo_prefs_boot_counter(fm24cl64_t *fram)
+{
+    prefs_store_t ps;
+    ESP_ERROR_CHECK(prefs_store_init(&ps,
+                                     fram,
+                                     /*start*/ PREFS_AREA_START,
+                                     /*area*/  PREFS_AREA_SIZE,
+                                     /*ver*/   PREFS_VERSION,
+                                     /*size*/  sizeof(boot_prefs_t)));
+
+    boot_prefs_t prefs = {0};
+    bool has = false;
+    ESP_ERROR_CHECK(prefs_store_load(&ps, &prefs, &has));
+
+    if(!has) {
+        // first time or version mismatch → start from zero
+        prefs.boot_count = 0;
+    }
+
+    // Report current count
+    ESP_LOGI("prefs", "Boot count (before increment): %u", (unsigned)prefs.boot_count);
+
+    // Increment and save
+    prefs.boot_count++;
+    ESP_ERROR_CHECK(prefs_store_save(&ps, &prefs));
+
+    ESP_LOGI("prefs", "Boot count saved as: %u", (unsigned)prefs.boot_count);
+}
 
 static void act_led(lv_event_t *e) {
     if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;   // for toggles
@@ -323,6 +370,31 @@ void app_main(void)
     ESP_LOGI(TAG, "Init (ESP-IDF + LVGL v9), ST7796 %dx%d, SPI=%u Hz", LCD_H_RES, LCD_V_RES, LCD_SPI_CLOCK_HZ);
     beeper_init_disable();   // keep GPIO39 low at boot
 
+
+    // -------------------- I2C BUS (shared) --------------------
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = 0,                 // I2C0
+        .sda_io_num = PIN_I2C_SDA,
+        .scl_io_num = PIN_I2C_SCL,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = { .enable_internal_pullup = 0 } // you have external pull-ups
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &g_i2c_bus));
+
+    // -------------------- FRAM (FM24CL64) on shared I2C bus --------------------
+    fm24cl64_config_t fcfg = {
+        .bus          = g_i2c_bus,
+        .i2c_addr     = 0x50,     // FM24CL64 default (A2..A0 = 0)
+        .scl_speed_hz = 100000
+    };
+    ESP_ERROR_CHECK(fm24cl64_init(&fcfg, &g_fram));
+
+    // FRAM is ready at this point
+    demo_prefs_boot_counter(&g_fram);
+
     // 1) SPI bus
     spi_bus_config_t buscfg = {
         .sclk_io_num = PIN_SPI_SCK,
@@ -391,28 +463,27 @@ void app_main(void)
     lv_display_set_buffers(disp, buf1, buf2, buf_size_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
 
-    esp_lcd_touch_handle_t tp = NULL;
-
     touch_ft6336_cfg_t tcfg = {
-        .i2c_sda_io = 1,       // external pull-ups present
-        .i2c_scl_io = 2,       // external pull-ups present
-        .int_io = 40,          // internal pull-up enabled
-        .rst_io = 21,          // if not wired, set to -1
-        .x_max = LCD_V_RES,        // match current orientation
-        .y_max = LCD_H_RES,
-        .swap_xy = true,      // we already oriented panel via mirror/swap
+        .i2c_sda_io = PIN_I2C_SDA,   // ignored by _on_bus variant
+        .i2c_scl_io = PIN_I2C_SCL,   // ignored by _on_bus variant
+        .int_io = PIN_TOUCH_INT,
+        .rst_io = PIN_TOUCH_RST,
+        .x_max = LCD_H_RES,     // 480
+        .y_max = LCD_V_RES,     // 320
+        .swap_xy = false,
         .mirror_x = true,
         .mirror_y = false,
-        .i2c_clk_hz = 100000,  // 100 kHz to start (raise to 400k if stable)
+        .i2c_clk_hz = 100000,
     };
 
-    ESP_ERROR_CHECK(touch_ft6336_init(&tcfg, &tp));
-    lv_indev_t *indev = touch_lvgl_register(tp);
-    lv_indev_set_disp(indev, lv_display_get_default());  // explicit association
-    // touch_dbg_start(indev);               // optional console logs
+    esp_lcd_touch_handle_t tp = NULL;
 
-    // (Optional) On-screen red dot and "(x,y)" label + UART logs:
-    touch_debug_overlay_create(indev, /*log_uart=*/true, /*show_label=*/true);
+    ESP_ERROR_CHECK(touch_ft6336_init_on_bus(g_i2c_bus, &tcfg, &tp));
+
+    lv_indev_t *indev = touch_lvgl_register(tp);
+    lv_indev_set_display(indev, lv_display_get_default());   // <-- add this line
+    touch_debug_overlay_create(indev, true, true);           // your red-dot/coords overlay
+    // touch_debug_start(tp, "touch");                          // start the logger with the handle
 
     // 5) Simple UI
     /* Optional: clear to black once (native geometry) */
