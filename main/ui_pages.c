@@ -35,6 +35,14 @@ static lv_obj_t *_make_one(lv_obj_t *parent, ui_theme_t *t, const ui_widget_desc
         }
         if (d->w > 0 && d->h > 0) lv_obj_set_size(o, d->w, d->h);
         lv_obj_align(o, d->align, d->x_ofs, d->y_ofs);
+        /* Apply initial toggle state if requested */
+        if (d->toggle) {
+            if (d->init_checked) {
+                lv_obj_add_state(o, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(o, LV_STATE_CHECKED);
+            }
+        }
         break;
     }
     case UIW_LABEL: {

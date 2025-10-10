@@ -25,6 +25,7 @@ typedef enum {
   UIW_BUTTON,
   UIW_LABEL,
   UIW_BOX,
+  UIW_SPACER
 } ui_widget_type_t;
 
 typedef struct {
@@ -43,6 +44,7 @@ typedef struct {
   // Button-only styling/behavior
   uint32_t variants; // UI_BTN_VARIANT_* bitmask
   bool toggle;       // checkable button
+  bool init_checked; // initial state for toggle buttons (true = starts checked)
 
   // Native LVGL callback
   lv_event_cb_t on_event;

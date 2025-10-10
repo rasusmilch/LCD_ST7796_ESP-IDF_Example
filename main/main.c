@@ -171,8 +171,8 @@ static void act_led(lv_event_t *e) {
     lv_obj_t *btn = lv_event_get_target(e);
     bool on = lv_obj_has_state(btn, LV_STATE_CHECKED);
 
-    if (on) { led_addr_fill(0,0,0); }
-    else    { led_addr_fill(255,255,255); }
+    if (on) { led_addr_fill(255,255,255); }
+    else    { led_addr_fill(0,0,0); }
     led_addr_show();
 }
 
@@ -327,6 +327,7 @@ static void ui_create(void)
             .text = "LED",
             .variants = UI_BTN_VARIANT_PRIMARY | UI_BTN_VARIANT_ROUND,
             .toggle = true,
+            .init_checked = false,     /* start OFF (unchecked) to match initial LED state */
             .on_event = act_led, .user_data = NULL,
             .require_mask = UIF_POWER, .block_mask = 0,
             .groups_mask = UGRP_DEFAULT
@@ -339,6 +340,7 @@ static void ui_create(void)
             .text = "Next",
             .variants = UI_BTN_VARIANT_OUTLINE,
             .toggle = false,
+            .init_checked = false,
             .on_event = act_next, .user_data = NULL,
             .require_mask = (UIF_POWER | UIF_ADVANCED), .block_mask = 0,
             .groups_mask = UGRP_DEFAULT
