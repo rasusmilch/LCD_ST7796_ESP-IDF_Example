@@ -12,6 +12,15 @@
 
 static const char *TAG = "touch_ft6336";
 
+/* ========= LVGL glue (v9) ========= */
+
+typedef struct {
+    esp_lcd_touch_handle_t tp;
+    uint16_t x_max, y_max;
+} touch_lvg_ctx_t;
+
+static touch_lvg_ctx_t s_tctx = {0};
+
 /* -------- init touch on an EXISTING I2C bus -------- */
 esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
                                    const touch_ft6336_cfg_t *cfg,
@@ -53,6 +62,7 @@ esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
         .control_phase_bytes = 1,
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : 100000,
         .flags = { .disable_control_phase = 0 },
     };
     esp_lcd_panel_io_handle_t io = NULL;
@@ -78,6 +88,11 @@ esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
     esp_lcd_touch_handle_t tp = NULL;
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_ft5x06(io, &tp_cfg, &tp), TAG, "ft5x06 init");
 
+    /* remember limits for clamping */
+    s_tctx.tp = tp;
+    s_tctx.x_max = cfg->x_max;
+    s_tctx.y_max = cfg->y_max;
+
     *out_tp = tp;
 
     ESP_LOGI(TAG, "FT6336 ready (0x%02X) %ux%u, swap_xy=%d mx=%d my=%d",
@@ -89,24 +104,15 @@ esp_err_t touch_ft6336_init_on_bus(i2c_master_bus_handle_t bus,
 
 /* -------- Minimal LVGL indev registration (no wrappers needed) -------- */
 
-/* Keep a tiny static for range clamping */
-typedef struct {
-    esp_lcd_touch_handle_t tp;
-    uint16_t x_max, y_max;
-} touch_lvg_ctx_t;
-
-static touch_lvg_ctx_t s_tctx = {0};
-
+/* LVGL v9 read callback */
 static void lv_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
     if (!s_tctx.tp) { data->state = LV_INDEV_STATE_RELEASED; return; }
 
-    /* Pull a fresh sample from the IC */
     esp_lcd_touch_read_data(s_tctx.tp);
 
-    uint16_t x = 0, y = 0;
-    uint8_t n = 0;
+    uint16_t x = 0, y = 0; uint8_t n = 0;
     bool pressed = esp_lcd_touch_get_coordinates(s_tctx.tp, &x, &y, NULL, &n, 1);
 
     if (pressed && n) {
@@ -120,16 +126,15 @@ static void lv_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     }
 }
 
-/* Call this once after touch init; returns the LVGL input device */
-lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp, uint16_t x_max, uint16_t y_max)
+/* Register the touch as an LVGL input device (v9 way) */
+lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp)
 {
-    s_tctx.tp = tp; s_tctx.x_max = x_max; s_tctx.y_max = y_max;
+    s_tctx.tp = tp;
 
-    static lv_indev_drv_t drv;
-    lv_indev_drv_init(&drv);
-    drv.type    = LV_INDEV_TYPE_POINTER;
-    drv.read_cb = lv_touch_read_cb;
-    return lv_indev_drv_register(&drv);
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, lv_touch_read_cb);
+    return indev;
 }
 
 /* -------- Optional: console debug task (does NOT touch LVGL) -------- */

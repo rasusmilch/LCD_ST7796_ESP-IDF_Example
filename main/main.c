@@ -59,6 +59,8 @@
 
 #include "prefs_store.h"
 
+static uint32_t g_ui_flags = 0;   // <-- define the app UI gating flags here
+
 // Pick a non-overlapping FRAM window for preferences
 #define PREFS_AREA_START   0x0400   // adjust if you already use 0x0000.. elsewhere
 #define PREFS_AREA_SIZE    1024     // a few slots is enough
@@ -372,8 +374,8 @@ static void ui_create(void)
 
     ui_page_handle_t *home = ui_page_build(scr, &g_theme, &HOME_PAGE);
     // Compose flags from current app state
-    g_ui_flags = UIF_POWER;                 // enable “LED” for testing
-    g_ui_flags |= UIF_ADVANCED;          // enable “Next” too, if you want
+    g_ui_flags = UIF_POWER;                 // enable "LED" for testing
+    g_ui_flags |= UIF_ADVANCED;          // enable "Next" too, if you want
     ui_page_set_flags(home, g_ui_flags);
     ui_page_apply(home);
 
@@ -394,8 +396,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_bus_shared_init());
 
     /* 2) FRAM on the same bus */
-    fm24cl64_t fram = {0};
-    ESP_ERROR_CHECK(fm24cl64_init_on_bus(g_i2c_bus, 0x50, &fram));   /* 0x50..0x57 depending on A2/A1/A0 */
+    ESP_ERROR_CHECK(fm24cl64_init_on_bus(g_i2c_bus, 0x50, &g_fram));   /* 0x50..0x57 depending on A2/A1/A0 */
 
     /* 3) Touch on the same bus */
     esp_lcd_touch_handle_t tp = NULL;
@@ -414,8 +415,6 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(touch_ft6336_init_on_bus(g_i2c_bus, &tcfg, &tp));
 
-    lv_indev_t *indev = touch_lvgl_register(tp, tcfg.x_max, tcfg.y_max);
-    
     // FRAM is ready at this point
     demo_prefs_boot_counter(&g_fram);
 
@@ -486,6 +485,8 @@ void app_main(void)
     void *buf2 = heap_caps_malloc(buf_size_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
     lv_display_set_buffers(disp, buf1, buf2, buf_size_bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, lvgl_flush_cb);
+
+    lv_indev_t *indev = touch_lvgl_register(tp);
 
     lv_indev_set_display(indev, lv_display_get_default());   // <-- add this line
     touch_debug_overlay_create(indev, true, true);           // your red-dot/coords overlay
