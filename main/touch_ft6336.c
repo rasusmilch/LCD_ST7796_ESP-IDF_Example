@@ -101,7 +101,7 @@ void touch_dbg_start(lv_indev_t *indev)
 }
 
 /* ---------- Initialization (I2C bus + FT6336 via FT5x06 driver) ---------- */
-esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_t *out_tp)
+esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, i2c_master_bus_handle_t *bus, uint32_t bus_speed, esp_lcd_touch_handle_t *out_tp)
 {
     ESP_RETURN_ON_FALSE(cfg, ESP_ERR_INVALID_ARG, TAG, "cfg is NULL");
 
@@ -135,17 +135,18 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
     }
 
     // I2C master bus (EXTERNAL pull-ups on SDA/SCL -> disable internal)
-    i2c_master_bus_config_t bus_cfg = {
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = 0,
-        .sda_io_num = cfg->i2c_sda_io,
-        .scl_io_num = cfg->i2c_scl_io,
-        .glitch_ignore_cnt = 7,
-        .intr_priority = 0,
-        .trans_queue_depth = 0,
-        .flags = {.enable_internal_pullup = 0},
-    };
-    ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_ctx.i2c_bus), TAG, "i2c bus create failed");
+    // i2c_master_bus_config_t bus_cfg = {
+    //     .clk_source = I2C_CLK_SRC_DEFAULT,
+    //     .i2c_port = 0,
+    //     .sda_io_num = cfg->i2c_sda_io,
+    //     .scl_io_num = cfg->i2c_scl_io,
+    //     .glitch_ignore_cnt = 7,
+    //     .intr_priority = 0,
+    //     .trans_queue_depth = 0,
+    //     .flags = {.enable_internal_pullup = 0},
+    // };
+    // ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_cfg, &s_ctx.i2c_bus), TAG, "i2c bus create failed");
+    s_ctx.i2c_bus = *bus;
 
     // Panel IO wrapper for the FT5x06/FT6336 touch over I2C
 #ifdef ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG
@@ -160,7 +161,7 @@ esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_
     };
 #endif
     io_cfg.dev_addr = 0x38;  // FT6336/FT5x06 default
-    io_cfg.scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : 100000; // 100k first; 400k once stable
+    io_cfg.scl_speed_hz = cfg->i2c_clk_hz ? cfg->i2c_clk_hz : bus_speed; // 100k first; 400k once stable
 
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_ctx.i2c_bus, &io_cfg, &s_ctx.io),
                         TAG, "panel io i2c failed");

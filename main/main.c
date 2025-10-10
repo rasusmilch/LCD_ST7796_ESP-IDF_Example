@@ -36,6 +36,7 @@
 
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
+#include "driver/i2c_master.h"
 
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
@@ -51,6 +52,8 @@
 
 #include "beeper.h"   // keeps GPIO39 low so your buzzer doesn't chirp on boot
 #include "led_addr.h"
+#include "prefs_store.h"
+#include "fm24cl64.h"
 
 // -------------------- Pins (from your working bring-up) --------------------
 #define PIN_LCD_RST   15
@@ -66,6 +69,11 @@
 #define PIN_I2C_SCL   2
 #define PIN_TOUCH_INT 40
 #define PIN_TOUCH_RST 21
+
+static fm24cl64_t g_fram;
+static i2c_master_bus_handle_t g_i2c_bus = {0};
+#define I2C_BUS_CLOCK_HZ 100000U
+
 
 // -------------------- Panel / SPI timing --------------------
 #define LCD_HOST            SPI2_HOST
@@ -112,6 +120,14 @@ static const char *TAG = "lvgl_st7796_min";
 // one global theme (file-scope)
 static ui_theme_t g_theme;
 
+#define PREFS_AREA_START 0x40
+#define PREFS_AREA_SIZE 1000U
+#define PREFS_VERSION 2
+
+typedef struct {
+    uint32_t boot_count;
+} boot_prefs_t;
+
 typedef struct {
     bool status;
     int status_gpio;
@@ -120,6 +136,35 @@ typedef struct {
 
 static uint32_t g_ui_flags = 0;   // UIF_* mask at runtime
 static bool g_adv_enabled = false; // flip this when user enters Advanced
+
+static void demo_prefs_boot_counter(fm24cl64_t *fram)
+{
+    prefs_store_t ps;
+    ESP_ERROR_CHECK(prefs_store_init(&ps,
+                                     fram,
+                                     /*start*/ PREFS_AREA_START,
+                                     /*area*/  PREFS_AREA_SIZE,
+                                     /*ver*/   PREFS_VERSION,
+                                     /*size*/  sizeof(boot_prefs_t)));
+
+    boot_prefs_t prefs = {0};
+    bool has = false;
+    ESP_ERROR_CHECK(prefs_store_load(&ps, &prefs, &has));
+
+    if(!has) {
+        // first time or version mismatch → start from zero
+        prefs.boot_count = 0;
+    }
+
+    // Report current count
+    ESP_LOGI("prefs", "Boot count (before increment): %u", (unsigned)prefs.boot_count);
+
+    // Increment and save
+    prefs.boot_count++;
+    ESP_ERROR_CHECK(prefs_store_save(&ps, &prefs));
+
+    ESP_LOGI("prefs", "Boot count saved as: %u", (unsigned)prefs.boot_count);
+}
 
 static void act_led(lv_event_t *e) {
     if(lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED) return;   // for toggles
@@ -323,6 +368,30 @@ void app_main(void)
     ESP_LOGI(TAG, "Init (ESP-IDF + LVGL v9), ST7796 %dx%d, SPI=%u Hz", LCD_H_RES, LCD_V_RES, LCD_SPI_CLOCK_HZ);
     beeper_init_disable();   // keep GPIO39 low at boot
 
+    // I2C master bus (EXTERNAL pull-ups on SDA/SCL -> disable internal)
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = 0,
+        .sda_io_num = PIN_I2C_SDA,
+        .scl_io_num = PIN_I2C_SCL,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = {.enable_internal_pullup = 0},
+    };
+
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &g_i2c_bus));
+
+    fm24cl64_config_t fram_cfg = {
+        .bus          = g_i2c_bus,
+        .i2c_addr     = 0x50,         // FM24CL64B default (A2..A0=0)
+        .scl_speed_hz = I2C_BUS_CLOCK_HZ    // <-- single source of truth
+    };
+    
+    ESP_ERROR_CHECK(fm24cl64_init(&fram_cfg, &g_fram));
+
+    demo_prefs_boot_counter(&g_fram);
+
     // 1) SPI bus
     spi_bus_config_t buscfg = {
         .sclk_io_num = PIN_SPI_SCK,
@@ -394,8 +463,6 @@ void app_main(void)
     esp_lcd_touch_handle_t tp = NULL;
 
     touch_ft6336_cfg_t tcfg = {
-        .i2c_sda_io = 1,       // external pull-ups present
-        .i2c_scl_io = 2,       // external pull-ups present
         .int_io = 40,          // internal pull-up enabled
         .rst_io = 21,          // if not wired, set to -1
         .x_max = LCD_V_RES,        // match current orientation
@@ -403,10 +470,9 @@ void app_main(void)
         .swap_xy = true,      // we already oriented panel via mirror/swap
         .mirror_x = true,
         .mirror_y = false,
-        .i2c_clk_hz = 100000,  // 100 kHz to start (raise to 400k if stable)
     };
 
-    ESP_ERROR_CHECK(touch_ft6336_init(&tcfg, &tp));
+    ESP_ERROR_CHECK(touch_ft6336_init(&tcfg, &g_i2c_bus, I2C_BUS_CLOCK_HZ,  &tp));
     lv_indev_t *indev = touch_lvgl_register(tp);
     lv_indev_set_disp(indev, lv_display_get_default());  // explicit association
     // touch_dbg_start(indev);               // optional console logs

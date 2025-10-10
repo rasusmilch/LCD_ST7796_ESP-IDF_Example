@@ -20,7 +20,7 @@ typedef struct {
     uint32_t i2c_clk_hz;
 } touch_ft6336_cfg_t;
 
-esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, esp_lcd_touch_handle_t *out_tp);
+esp_err_t touch_ft6336_init(const touch_ft6336_cfg_t *cfg, i2c_master_bus_handle_t *bus, uint32_t bus_speed, esp_lcd_touch_handle_t *out_tp);
 
 /* NEW: register the touch with LVGL, returns lv_indev_t* */
 lv_indev_t *touch_lvgl_register(esp_lcd_touch_handle_t tp);

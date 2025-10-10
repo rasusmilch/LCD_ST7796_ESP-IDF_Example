@@ -7,6 +7,9 @@ idf_component_register(SRCS
     "led_addr.c" 
     "ui_theme.c" 
     "ui_pages.c"
+    "fm24cl64.c"
+    "fram_wl.c"
+    "prefs_store.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver              # GPIO/I2C/SPI/LEDC
